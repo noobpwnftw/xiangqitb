@@ -1,0 +1,1 @@
+g++ -march=native -Wall -flto -O3 -DNDEBUG -std=c++17 -pthread -Ilib -Isrc ./lib/lz4/*.c ./lib/LZMA/*.c ./lib/zstd/common/*.c ./lib/zstd/compress/*.c ./lib/zstd/dictBuilder/*.c ./src/*.cpp ./src/util/*.cpp ./src/chess/*.cpp ./src/egtb/*.cpp -o genegtb

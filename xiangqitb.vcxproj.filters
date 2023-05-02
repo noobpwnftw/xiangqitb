@@ -1,0 +1,435 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{73917f0a-b2a3-4663-9fc8-5bc6263e2b4e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib">
+      <UniqueIdentifier>{1bc3f193-75f4-473e-a57d-c86fb3a72e93}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\zstd">
+      <UniqueIdentifier>{6fb565d2-2a4d-4fc3-a72e-d183db6d4da3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\lz4">
+      <UniqueIdentifier>{3c045964-dd93-4884-bd4e-bfdf40084ed2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\LZMA">
+      <UniqueIdentifier>{32895792-8e1a-4187-948d-3ae33f211bb4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\zstd\common">
+      <UniqueIdentifier>{c2e470af-a19c-4136-8d10-111727dff2ae}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\zstd\compress">
+      <UniqueIdentifier>{8adb02d5-c005-4eee-931f-77b7a95ee4f9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\zstd\dictBuilder">
+      <UniqueIdentifier>{cc22b056-0c6f-45be-b2b1-96714a0ea869}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\util">
+      <UniqueIdentifier>{90abc871-5933-4b2c-b619-2ab93b5ae665}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\chess">
+      <UniqueIdentifier>{da1c4548-0b94-4cc5-9562-5aae64ae812a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\egtb">
+      <UniqueIdentifier>{e0761936-549e-46f7-91a1-55f5eaa6a07a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\system">
+      <UniqueIdentifier>{e646d6a2-6be9-4667-b7e1-c3fab6199b2d}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="lib\lz4\lz4.c">
+      <Filter>lib\lz4</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\lz4\lz4hc.c">
+      <Filter>lib\lz4</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZMA\Alloc.c">
+      <Filter>lib\LZMA</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZMA\CpuArch.c">
+      <Filter>lib\LZMA</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZMA\LzFind.c">
+      <Filter>lib\LZMA</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZMA\LzmaDec.c">
+      <Filter>lib\LZMA</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZMA\LzmaEnc.c">
+      <Filter>lib\LZMA</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZMA\LzmaLib.c">
+      <Filter>lib\LZMA</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\debug.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\entropy_common.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\error_private.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\fse_decompress.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\pool.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\threading.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\xxhash.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\common\zstd_common.c">
+      <Filter>lib\zstd\common</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\fse_compress.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\hist.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\huf_compress.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_compress.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_compress_literals.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_compress_sequences.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_compress_superblock.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_double_fast.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_fast.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_lazy.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_ldm.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstd_opt.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\compress\zstdmt_compress.c">
+      <Filter>lib\zstd\compress</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\dictBuilder\cover.c">
+      <Filter>lib\zstd\dictBuilder</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\dictBuilder\divsufsort.c">
+      <Filter>lib\zstd\dictBuilder</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\dictBuilder\fastcover.c">
+      <Filter>lib\zstd\dictBuilder</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\zstd\dictBuilder\zdict.c">
+      <Filter>lib\zstd\dictBuilder</Filter>
+    </ClCompile>
+    <ClCompile Include="src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\attack.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\bitboard.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\chess.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\move.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\move_check.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\move_gen.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\move_legal.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\position.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\util\intrin.cpp">
+      <Filter>src\util</Filter>
+    </ClCompile>
+    <ClCompile Include="src\util\filesystem.cpp">
+      <Filter>src\util</Filter>
+    </ClCompile>
+    <ClCompile Include="src\chess\piece_config.cpp">
+      <Filter>src\chess</Filter>
+    </ClCompile>
+    <ClCompile Include="src\util\compress.cpp">
+      <Filter>src\util</Filter>
+    </ClCompile>
+    <ClCompile Include="src\egtb\egtb.cpp">
+      <Filter>src\egtb</Filter>
+    </ClCompile>
+    <ClCompile Include="src\egtb\egtb_compress.cpp">
+      <Filter>src\egtb</Filter>
+    </ClCompile>
+    <ClCompile Include="src\egtb\egtb_gen.cpp">
+      <Filter>src\egtb</Filter>
+    </ClCompile>
+    <ClCompile Include="src\egtb\egtb_gen_dtm.cpp">
+      <Filter>src\egtb</Filter>
+    </ClCompile>
+    <ClCompile Include="src\egtb\egtb_gen_wdl_dtc.cpp">
+      <Filter>src\egtb</Filter>
+    </ClCompile>
+    <ClCompile Include="src\util\allocation.cpp">
+      <Filter>src\util</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="lib\lz4\lz4.h">
+      <Filter>lib\lz4</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\lz4\lz4hc.h">
+      <Filter>lib\lz4</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\7zTypes.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\Alloc.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\Compiler.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\CpuArch.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\LzFind.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\LzHash.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\LzmaDec.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\LzmaEnc.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\LzmaLib.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\LZMA\Precomp.h">
+      <Filter>lib\LZMA</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\zdict.h">
+      <Filter>lib\zstd</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\zstd.h">
+      <Filter>lib\zstd</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\zstd_errors.h">
+      <Filter>lib\zstd</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\bitstream.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\compiler.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\cpu.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\debug.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\error_private.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\fse.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\huf.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\mem.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\pool.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\portability_macros.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\threading.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\xxhash.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\zstd_deps.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\zstd_internal.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\common\zstd_trace.h">
+      <Filter>lib\zstd\common</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\clevels.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\hist.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_compress_internal.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_compress_literals.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_compress_sequences.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_compress_superblock.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_cwksp.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_double_fast.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_fast.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_lazy.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_ldm.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_ldm_geartab.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstd_opt.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\compress\zstdmt_compress.h">
+      <Filter>lib\zstd\compress</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\dictBuilder\cover.h">
+      <Filter>lib\zstd\dictBuilder</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\zstd\dictBuilder\divsufsort.h">
+      <Filter>lib\zstd\dictBuilder</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\defines.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\fixed_vector.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\utility.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\chess\attack.h">
+      <Filter>src\chess</Filter>
+    </ClInclude>
+    <ClInclude Include="src\chess\bitboard.h">
+      <Filter>src\chess</Filter>
+    </ClInclude>
+    <ClInclude Include="src\chess\chess.h">
+      <Filter>src\chess</Filter>
+    </ClInclude>
+    <ClInclude Include="src\chess\move.h">
+      <Filter>src\chess</Filter>
+    </ClInclude>
+    <ClInclude Include="src\chess\position.h">
+      <Filter>src\chess</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\intrin.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\division.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\enum.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\span.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\math.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\param.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\algo.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\filesystem.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\thread_pool.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\progress_bar.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\chess\piece_config.h">
+      <Filter>src\chess</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\init.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\lazy.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\endian.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\memory.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\compress.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\egtb\egtb.h">
+      <Filter>src\egtb</Filter>
+    </ClInclude>
+    <ClInclude Include="src\egtb\egtb_compress.h">
+      <Filter>src\egtb</Filter>
+    </ClInclude>
+    <ClInclude Include="src\egtb\egtb_gen.h">
+      <Filter>src\egtb</Filter>
+    </ClInclude>
+    <ClInclude Include="src\egtb\egtb_gen_dtm.h">
+      <Filter>src\egtb</Filter>
+    </ClInclude>
+    <ClInclude Include="src\egtb\egtb_gen_wdl_dtc.h">
+      <Filter>src\egtb</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\allocation.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\system\system.h">
+      <Filter>src\system</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\dispatch.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
