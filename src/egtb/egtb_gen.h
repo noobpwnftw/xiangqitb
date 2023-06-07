@@ -1205,8 +1205,6 @@ protected:
 	NODISCARD Board_Index next_cap_index(const Position_For_Gen& pos_for_gen, Move move) const;
 	NODISCARD Board_Index next_quiet_index(const Position_For_Gen& pos_for_gen, Move move) const;
 	NODISCARD Board_Index next_quiet_index(const Position_For_Gen& pos_for_gen, Move move, Out_Param<bool> mirr) const;
-
-	NODISCARD Fixed_Vector<Board_Index, 2> pre_quiet_index(const Position_For_Gen& pos_for_gen, Move move) const;
 	NODISCARD Fixed_Vector<Board_Index, 2> next_quiet_index_with_mirror(const Position_For_Gen& pos_for_gen, Move move) const;
 
 	NODISCARD Shared_Board_Index_Iterator make_gen_iterator() const;

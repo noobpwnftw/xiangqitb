@@ -262,7 +262,7 @@ bool DTC_Generator::sp_gen_pre_bits(
 
 		for (const Move move : board.gen_pseudo_legal_pre_quiets())
 		{
-			for (const Board_Index next_ix : pre_quiet_index(gen_pos, move))
+			for (const Board_Index next_ix : next_quiet_index_with_mirror(gen_pos, move))
 			{
 				if (is_unknown(next_ix, opp))
 				{

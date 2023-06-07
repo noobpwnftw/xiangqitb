@@ -337,7 +337,7 @@ bool DTM_Generator::sp_gen_pre_bits(
 
 		for (const Move move : board.gen_pseudo_legal_pre_quiets())
 		{
-			for (const Board_Index next_ix : pre_quiet_index(pos_gen, move))
+			for (const Board_Index next_ix : next_quiet_index_with_mirror(pos_gen, move))
 			{
 				if (is_unknown(next_ix, opp))
 				{

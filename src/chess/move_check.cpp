@@ -309,6 +309,13 @@ bool Position::is_move_attack(Move move, Move_Legality_Lower_Bound legality)
 	if (legality <= Move_Legality_Lower_Bound::PSEUDO_LEGAL && !is_pseudo_legal_move_legal(move))
 		return false;
 
+/*
+	Giving checks are not considered evasions of existing attacks, therefore if this is called when in check, we ignore the legality of NOT dealing with existing checks.
+
+	if (legality <= Move_Legality_Lower_Bound::PSEUDO_LEGAL && (is_in_check() ? !is_pseudo_legal_move_legal_in_check(move) : !is_pseudo_legal_move_legal(move)))
+		return false;
+*/
+
 	ASSERT(is_move_pseudo_legal(move));
 	ASSERT(is_pseudo_legal_move_legal(move));
 

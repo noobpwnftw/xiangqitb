@@ -95,10 +95,10 @@ Board_Index EGTB_Generator::next_cap_index(const Position_For_Gen& pos_for_gen, 
 
 enum struct Quiet_Index_Type
 {
-	PREV, NEXT
+	MIRROR, NORMAL
 };
 
-template <Quiet_Index_Type DIR>
+template <Quiet_Index_Type MIRR>
 static auto quiet_index(
 	const Piece_Config_For_Gen& epsi, 
 	const Position_For_Gen& pos_for_gen, 
@@ -125,7 +125,7 @@ static auto quiet_index(
 	{
 		const Board_Index pre_idx = epsi.change_single_group_index(current_pos, index[id], ix.base(), id);
 
-		if constexpr (DIR == Quiet_Index_Type::NEXT)
+		if constexpr (MIRR == Quiet_Index_Type::NORMAL)
 			return pre_idx;
 		else
 			ix_tb.emplace_back(pre_idx);
@@ -137,13 +137,13 @@ static auto quiet_index(
 		const Board_Index mir_idx = epsi.compose_mirr_board_index(index);
 		const Board_Index pre_idx = epsi.change_single_group_index(mir_idx, group.mirr_index(index[id]), ix.mirr(), id);
 
-		if constexpr (DIR == Quiet_Index_Type::NEXT)
+		if constexpr (MIRR == Quiet_Index_Type::NORMAL)
 			return pre_idx;
 		else
 			ix_tb.emplace_back(pre_idx);
 	}
 
-	if constexpr (DIR == Quiet_Index_Type::NEXT)
+	if constexpr (MIRR == Quiet_Index_Type::NORMAL)
 	{
 		ASSUME(false);
 		return BOARD_INDEX_NONE;
@@ -152,23 +152,13 @@ static auto quiet_index(
 		return ix_tb;
 }
 
-Fixed_Vector<Board_Index, 2> EGTB_Generator::pre_quiet_index(
-	const Position_For_Gen& pos_for_gen, 
-	Move move
-) const
-{
-	bool mirr;
-	return quiet_index<Quiet_Index_Type::PREV>(m_epsi, pos_for_gen, move, out_param(mirr));
-}
-
-// Equivalent to pre_quiet_index, but conveys semantics better.
 Fixed_Vector<Board_Index, 2> EGTB_Generator::next_quiet_index_with_mirror(
 	const Position_For_Gen& pos_for_gen,
 	Move move
 ) const
 {
 	bool mirr;
-	return quiet_index<Quiet_Index_Type::PREV>(m_epsi, pos_for_gen, move, out_param(mirr));
+	return quiet_index<Quiet_Index_Type::MIRROR>(m_epsi, pos_for_gen, move, out_param(mirr));
 }
 
 Board_Index EGTB_Generator::next_quiet_index(
@@ -177,7 +167,7 @@ Board_Index EGTB_Generator::next_quiet_index(
 ) const
 {
 	bool mirr;
-	return quiet_index<Quiet_Index_Type::NEXT>(m_epsi, pos_for_gen, move, out_param(mirr));
+	return quiet_index<Quiet_Index_Type::NORMAL>(m_epsi, pos_for_gen, move, out_param(mirr));
 }
 
 Board_Index EGTB_Generator::next_quiet_index(
@@ -186,7 +176,7 @@ Board_Index EGTB_Generator::next_quiet_index(
 	Out_Param<bool> mirr
 ) const
 {
-	return quiet_index<Quiet_Index_Type::NEXT>(m_epsi, pos_for_gen, move, mirr);
+	return quiet_index<Quiet_Index_Type::NORMAL>(m_epsi, pos_for_gen, move, mirr);
 }
 
 Shared_Board_Index_Iterator EGTB_Generator::make_gen_iterator() const
