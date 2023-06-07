@@ -46,7 +46,7 @@ struct Program_Options
 
 	size_t num_threads = 1;
 	size_t max_pieces = 20;
-	size_t memory_size = GiB;
+	size_t memory_size = 16 * GiB / MiB;
 
 	bool generate_run_list = true;
 	bool generate_tablebases = true;
@@ -204,7 +204,7 @@ int main(int argc, char* argv[])
 	{
 		std::cout << "Reading desired piece configurations from " << options.egtb_gen_list_file_path << "...\n";
 		const auto& base_list = read_gen_list(options.egtb_gen_list_file_path);
-		std::cout << "Finished reading resired piece configurations.\n";
+		std::cout << "Finished reading desired piece configurations.\n";
 
 		std::cout << "Preparing tablebase generation list.\n";
 		const auto& gen_list = make_gen_list(base_list, options);
@@ -514,13 +514,13 @@ bool parse_line(const std::string& line, std::string& name, std::string& value)
 		end = line.size();
 
 	// split at '='
-	const auto eq_sign = line.find_first_of('=');
+	const auto eq_sign = line.substr(0, end).find_first_of('=');
 	if (eq_sign == std::string::npos)
 		return false;
 
 	// cleanup
 	name = strip(line.substr(0, eq_sign));
-	value = strip(line.substr(eq_sign + 1));
+	value = strip(line.substr(eq_sign + 1, end - eq_sign - 1));
 
 	return !name.empty() && !value.empty();
 }

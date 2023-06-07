@@ -1,5 +1,7 @@
 #include "egtb_gen_wdl_dtc.h"
 
+#include "chess/attack.h"
+
 #include "egtb_compress.h"
 
 #include "util/compress.h"
@@ -206,7 +208,7 @@ void DTC_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool)
 			m_wdl_file[me].close();
 	}
 
-	// Ñ¹ËõĞ´Èëegtb
+	// å‹ç¼©å†™å…¥egtb
 	if (m_save_dtc)
 	{
 		const std::filesystem::path info_path = m_egtb_files.dtc_info_save_path(m_epsi);
@@ -262,7 +264,7 @@ bool DTC_Generator::sp_gen_pre_bits(
 
 		for (const Move move : board.gen_pseudo_legal_pre_quiets())
 		{
-			for (const Board_Index next_ix : pre_quiet_index(gen_pos, move))
+			for (const Board_Index next_ix : next_quiet_index_with_mirror(gen_pos, move))
 			{
 				if (is_unknown(next_ix, opp))
 				{
@@ -611,7 +613,7 @@ void DTC_Generator::gen(In_Out_Param<Thread_Pool> thread_pool)
 	init_entries(thread_pool);
 	close_sub_evtb();
 
-	// µÚ¶ş²½£¬µü´ú»ñÈ¡ÊäÓ®ĞÅÏ¢
+	// ç¬¬äºŒæ­¥ï¼Œè¿­ä»£è·å–è¾“èµ¢ä¿¡æ¯
 	m_max_order = DTC_ORDER_ZERO;
 	m_max_conv = DTC_SCORE_ZERO;
 	m_entry_order = DTC_Entry_Order::ORDER_64;
@@ -920,8 +922,6 @@ bool DTC_Generator::sp_remove_fake(
 
 		const auto entry = read_dtc<DTC_Intermediate_Entry>(current_pos, me);
 
-		// ¼ìÑéÊäÆåÅÌÃæ
-		// ¼ìÑéÓ®ÆåÅÌÃæ
 		if (!entry.has_flag(flag_mask))
 			continue;
 
@@ -1012,7 +1012,7 @@ DTC_Intermediate_Entry DTC_Generator::check_remove_lose(
 	const Color opp = color_opp(me);
 
 	auto resolve_long_chase = [&](const Move_List& chase_list) {
-		if (chase_list.empty()) // Ã»ÕÒµ½×½×ÓÕĞ·¨£¬ËùÓĞÕĞ·¨¶¼ÊÇÊä
+		if (chase_list.empty()) // æ²¡æ‰¾åˆ°æ‰å­æ‹›æ³•ï¼Œæ‰€æœ‰æ‹›æ³•éƒ½æ˜¯è¾“
 		{
 			if (tt.has_flag(DTC_FLAG_CAP_DRAW))
 				tt.clear_flag(DTC_FLAG_CHASE_LOSE | DTC_FLAG_CHASE_WIN);
@@ -1036,7 +1036,7 @@ DTC_Intermediate_Entry DTC_Generator::check_remove_lose(
 			|| !board.is_in_check())
 			return;
 
-		// ±»½«¾üÁË£¬ÅĞ¶Ï¶Ô·½ÊÇ·ñ³£½«
+		// è¢«å°†å†›äº†ï¼Œåˆ¤æ–­å¯¹æ–¹æ˜¯å¦å¸¸å°†
 		for (const Move move : chase_list)
 		{
 			bool mirr;
@@ -1065,7 +1065,7 @@ DTC_Intermediate_Entry DTC_Generator::check_remove_lose(
 
 			if (!find_no_check)
 			{
-				// ¶¼ÔÚ½«¾ü
+				// éƒ½åœ¨å°†å†›
 				tt.clear_flag(DTC_FLAG_CHASE_LOSE);
 				return;
 			}
@@ -1138,7 +1138,7 @@ DTC_Intermediate_Entry DTC_Generator::check_remove_lose(
 			return tt;
 		}
 
-		if (check_list_empty) // Ã»ÕÒµ½½«¾üÕĞ·¨£¬ËùÓĞÕĞ·¨¶¼ÊÇÊä
+		if (check_list_empty) // æ²¡æ‰¾åˆ°å°†å†›æ‹›æ³•ï¼Œæ‰€æœ‰æ‹›æ³•éƒ½æ˜¯è¾“
 			on_check_list_empty();
 	}
 	else if (double_chase)
@@ -1194,13 +1194,35 @@ DTC_Intermediate_Entry DTC_Generator::check_remove_lose(
 					else
 						chase_list.add(move);
 
+					Bitboard evt_piecebb, cap_piecebb;
 					if (   !find_chase
 						&& entry.has_flag(DTC_FLAG_CHASE_WIN)
 						&& entry.has_flag(DTC_FLAG_CHASE_LOSE)
-						&& board.is_move_evasion(move)
-						&& board.has_attack_after_quiet_move(move))
+						&& board.is_move_evasion(move, out_param(evt_piecebb))
+						&& board.has_attack_after_quiet_move(move, out_param(cap_piecebb)))
 					{
-						find_chase = true;
+						evt_piecebb &= board.piece_bb(me, ROOK);
+						if (evt_piecebb)
+						{
+							bool find_rook = false;
+							const Square king_pos = board.king_square(me);
+							while (cap_piecebb)
+							{
+								const Square cap_sq = cap_piecebb.pop_first_square();
+								if (   board.piece_type_on(cap_sq) == KNIGHT
+									&& (knight_att_no_mask(cap_sq) & king_pos)
+									&& (evt_piecebb & knight_move_blocker(cap_sq, king_pos)))
+								{
+									find_no_chase = true;
+									find_rook = true;
+									break;
+								}
+							}
+							if (!find_rook)
+								find_chase = true;
+						}
+						else
+							find_chase = true;
 					}
 				}
 			}
