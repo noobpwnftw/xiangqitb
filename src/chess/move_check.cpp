@@ -309,6 +309,13 @@ bool Position::is_move_attack(Move move, Move_Legality_Lower_Bound legality)
 	if (legality <= Move_Legality_Lower_Bound::PSEUDO_LEGAL && !is_pseudo_legal_move_legal(move))
 		return false;
 
+/*
+	Giving checks are not considered evasions of existing attacks, therefore if this is called when in check, we ignore the legality of NOT dealing with existing checks.
+
+	if (legality <= Move_Legality_Lower_Bound::PSEUDO_LEGAL && (is_in_check() ? !is_pseudo_legal_move_legal_in_check(move) : !is_pseudo_legal_move_legal(move)))
+		return false;
+*/
+
 	ASSERT(is_move_pseudo_legal(move));
 	ASSERT(is_pseudo_legal_move_legal(move));
 
@@ -336,8 +343,12 @@ bool Position::is_move_attack(Move move, Move_Legality_Lower_Bound legality)
 	switch (piece_type(cap))
 	{
 	case ROOK:
-		return piece != ROOK
-			|| (!would_be_legal_for_other_side(Move(to, from)) && !is_square_attacked_after_move());
+		if (piece == BISHOP || piece == ADVISOR)
+			return !is_square_attacked_after_move();
+		else if (piece == ROOK)
+			return !would_be_legal_for_other_side(Move(to, from)) && !is_square_attacked_after_move();
+		else
+			return true;
 	case KNIGHT:
 		return (piece != KNIGHT || m_squares[knight_move_blocker(to, from)] || !would_be_legal_for_other_side(Move(to, from)))
 			&& !is_square_attacked_after_move();
@@ -581,7 +592,7 @@ Bitboard Position::attack_bb_after_quiet_move(Move pre_move)
 				bb |= move.to();
 			else
 			{
-				// ²»Í¬×ÓÒÆ¶¯
+				// ä¸åŒå­ç§»åŠ¨
 				undo_null_move();
 				undo_quiet_move(pre_move);
 
@@ -738,7 +749,7 @@ bool Position::is_move_check(Move move) const
 			return true;
 	}
 
-	// ÂíÍÈÀë½«
+	// é©¬è…¿ç¦»å°†
 	if (   may_block_knight_for_king(from, k_pos)
 		&& piece_bb(me, KNIGHT)[opp]
 		&& (knight_att_no_mask(k_pos)[opp] & piece_bb(me, KNIGHT)[opp])

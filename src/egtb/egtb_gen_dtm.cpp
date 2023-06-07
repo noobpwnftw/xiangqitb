@@ -1,5 +1,7 @@
 #include "egtb_gen_dtm.h"
 
+#include "chess/attack.h"
+
 #include "egtb_compress.h"
 
 #include "util/lazy.h"
@@ -55,7 +57,7 @@ void DTM_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool, const EGTB_
 	const std::string info_path = m_egtb_files.dtm_info_save_path(m_epsi).string();
 	const std::string egtb_path = m_egtb_files.dtm_save_path(m_epsi).string();
 
-	// —πÀı–¥»Îegtb
+	// ÂéãÁº©ÂÜôÂÖ•egtb
 	Compressed_EGTB save_info[COLOR_NB];
 	for (const Color me : { WHITE, BLACK })
 	{
@@ -142,7 +144,7 @@ std::pair<DTM_Any_Entry, WDL_Entry> DTM_Generator::make_initial_entry(const Posi
 
 	if (value == WDL_Entry::LOSE && sub_step != 0)
 	{
-		// µ±«∞æ÷√Ê ‰∆Â
+		// ÂΩìÂâçÂ±ÄÈù¢ËæìÊ£ã
 		ASSERT((sub_step & 1) != 0);
 		if (pos.is_quiet_mate(in_check))
 			return { DTM_Final_Entry::make_loss(sub_step), value };
@@ -151,7 +153,7 @@ std::pair<DTM_Any_Entry, WDL_Entry> DTM_Generator::make_initial_entry(const Posi
 	}
 	else if (value == WDL_Entry::WIN && sub_step != DTM_SCORE_MAX)
 	{
-		// ≥‘◊””Æ
+		// ÂêÉÂ≠êËµ¢
 		ASSERT(sub_step >= 2 && (sub_step & 1) == 0);
 		return { DTM_Intermediate_Entry::make_cap_score(sub_step), value };
 	}
@@ -317,7 +319,7 @@ bool DTM_Generator::sp_gen_pre_bits(
 				if (!entry.is_cap_win() || entry.cap_score() != n)
 					continue;
 
-				// ≥‘◊””Æ
+				// ÂêÉÂ≠êËµ¢
 				auto new_entry = DTM_Final_Entry::copy_rule(entry);
 				new_entry.set_score_win(entry.cap_score());
 				write_dtm(current_pos, me, new_entry);
@@ -337,7 +339,7 @@ bool DTM_Generator::sp_gen_pre_bits(
 
 		for (const Move move : board.gen_pseudo_legal_pre_quiets())
 		{
-			for (const Board_Index next_ix : pre_quiet_index(pos_gen, move))
+			for (const Board_Index next_ix : next_quiet_index_with_mirror(pos_gen, move))
 			{
 				if (is_unknown(next_ix, opp))
 				{
@@ -655,7 +657,7 @@ bool DTM_Generator::sp_load_bits(
 	DTM_Score max_crv = DTM_SCORE_ZERO;
 	bool find_new = false;
 
-	// º”‘ÿ ‰∆Â
+	// Âä†ËΩΩËæìÊ£ã
 	for (const Board_Index current_pos : gen_iterator->indices(bits))
 	{
 		auto entry = read_dtm<DTM_Final_Entry>(current_pos, me);
@@ -861,7 +863,7 @@ void DTM_Generator::loop_build_check_chase(In_Out_Param<Thread_Pool> thread_pool
 		const auto start_time = std::chrono::steady_clock::now();
 
 		const Color opp = color_opp(me);
-		m_max_step = static_cast<DTM_Score>(5); // ∫Û√Êª·–ﬁ∏ƒ
+		m_max_step = static_cast<DTM_Score>(5); // ÂêéÈù¢‰ºö‰øÆÊîπ
 
 		m_unknown_bits[WHITE] = tmp_bits->acquire_cleared(thread_pool);
 		m_unknown_bits[BLACK] = tmp_bits->acquire_cleared(thread_pool);
@@ -954,7 +956,7 @@ void DTM_Generator::gen(In_Out_Param<Thread_Pool> thread_pool)
 
 	loop_init_check_chase(thread_pool, inout_param(tmp_bits));
 
-	//µ⁄∂˛≤Ω£¨µ¸¥˙ªÒ»° ‰”Æ–≈œ¢
+	//Á¨¨‰∫åÊ≠•ÔºåËø≠‰ª£Ëé∑ÂèñËæìËµ¢‰ø°ÊÅØ
 
 	gen_rule_lose(thread_pool, inout_param(tmp_bits));
 
@@ -1427,7 +1429,7 @@ void DTM_Generator::sp_find_rule_lose(
 			if (!entry2.is_legal())
 				continue;
 
-			// ”Æ∆Â
+			// Ëµ¢Ê£ã
 			if (  (   !(entry.has_flag(DTM_FLAG_CHECK_LOSE) && entry2.has_flag(DTM_FLAG_CHECK_WIN))
 					&& !(entry.has_flag(DTM_FLAG_CHASE_LOSE) && entry2.has_flag(DTM_FLAG_CHASE_WIN)))
 				|| (m_wdl_file.read(opp, next_ix) != WDL_Entry::WIN))
@@ -1615,7 +1617,7 @@ bool DTM_Generator::sp_change_win_pos(
 				|| !entry2.has_flag(DTM_FLAG_CHASE_WIN) 
 				|| !board.has_attack_after_quiet_move(move);
 
-			//  ‰∆Â
+			// ËæìÊ£ã
 			if (entry2.score() > min_step)
 				continue;
 			
@@ -1656,6 +1658,7 @@ bool DTM_Generator::sp_change_win_pos(
 		bool check_or_chase_win = false;
 
 		Fixed_Vector<size_t, MAX_NEXT_TB_ENTRIES> chase_idx;
+		Bitboard evt_piecebb, cap_piecebb;
 
 		// Step 3.a.
 		// Either we find immediately that there's a check or chase win
@@ -1671,22 +1674,43 @@ bool DTM_Generator::sp_change_win_pos(
 				check_or_chase_win = true;
 				break;
 			}
-				
+
 			if (   !entry.has_flag(DTM_FLAG_CHASE_WIN)
 				|| !entry2.has_flag(DTM_FLAG_CHASE_LOSE)
-				|| !board.is_move_evasion(move))
+				|| !board.is_move_evasion(move, out_param(evt_piecebb)))
 				continue;
-			
+
 			if (   !find_no_rule
 				|| !entry.has_flag(DTM_FLAG_CHASE_LOSE)
 				|| !entry2.has_flag(DTM_FLAG_CHASE_WIN)
-				|| !board.has_attack_after_quiet_move(move))
+				|| !board.has_attack_after_quiet_move(move, out_param(cap_piecebb)))
 			{
 				check_or_chase_win = true;
 				break;
 			}
 
-			chase_idx.emplace_back(i);
+			evt_piecebb &= board.piece_bb(me, ROOK);
+			if (evt_piecebb)
+			{
+				bool find_rook = false;
+				const Square king_pos = board.king_square(me);
+				while (cap_piecebb)
+				{
+					const Square cap_sq = cap_piecebb.pop_first_square();
+					if (   board.piece_type_on(cap_sq) == KNIGHT
+						&& (knight_att_no_mask(cap_sq) & king_pos)
+						&& (evt_piecebb & knight_move_blocker(cap_sq, king_pos)))
+					{
+						check_or_chase_win = true;
+						find_rook = true;
+						break;
+					}
+				}
+				if (!find_rook)
+					chase_idx.emplace_back(i);
+			}
+			else
+				chase_idx.emplace_back(i);
 		}
 
 		// Step 3.b.

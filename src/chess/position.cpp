@@ -102,8 +102,8 @@ void Position::display() const
 {
 	static const char* PieceStr[16] =
 	{
-		"","Ë§","³µ","Âí","ÅÚ","Ê¿","Ïà","±ø",
-		"","½«","‚e","‚Ø","ˆƒ","ÊË","Ïó","×ä",
+		"","å¸…","è½¦","é©¬","ç‚®","å£«","ç›¸","å…µ",
+		"","å°†","ä¿¥","å‚Œ","å‰","ä»•","è±¡","å’",
 	};
 
 	printf("\n");
@@ -120,41 +120,41 @@ void Position::display() const
 		if (piece != PIECE_NONE)
 			printf("%s", PieceStr[piece]);
 		else if (i == SQ_I9)
-			printf("©°");
+			printf("â”Œ");
 		else if (i == SQ_A9)
-			printf("©´");
+			printf("â”");
 		else if (i == SQ_I0)
-			printf("©¸");
+			printf("â””");
 		else if (i == SQ_A0)
-			printf("©¼");
+			printf("â”˜");
 		else if (file == FILE_I)
-			printf("©À");
+			printf("â”œ");
 		else if (file == FILE_A)
-			printf("©È");
+			printf("â”¤");
 		else if (rank == RANK_4 || rank == RANK_9)
-			printf("©Ğ");
+			printf("â”¬");
 		else if (rank == RANK_0 || rank == RANK_5)
-			printf("©Ø");
+			printf("â”´");
 		else
-			printf("©à");
+			printf("â”¼");
 
 		if (file == FILE_A)
 		{
 			printf(" %d\n", static_cast<int>(rank));
 			if (rank == RANK_5)
-				printf(" ©¦                              ©¦\n");
+				printf(" â”‚                              â”‚\n");
 			else if (rank == RANK_2 || rank == RANK_9)
-				printf(" ©¦  ©¦  ©¦  ©¦¨v©¦¨u©¦  ©¦  ©¦  ©¦\n");
+				printf(" â”‚  â”‚  â”‚  â”‚â•²â”‚â•±â”‚  â”‚  â”‚  â”‚\n");
 			else if (rank == RANK_1 || rank == RANK_8)
-				printf(" ©¦  ©¦  ©¦  ©¦¨u©¦¨v©¦  ©¦  ©¦  ©¦\n");
+				printf(" â”‚  â”‚  â”‚  â”‚â•±â”‚â•²â”‚  â”‚  â”‚  â”‚\n");
 			else if (rank != RANK_0)
-				printf(" ©¦  ©¦  ©¦  ©¦  ©¦  ©¦  ©¦  ©¦  ©¦\n");
+				printf(" â”‚  â”‚  â”‚  â”‚  â”‚  â”‚  â”‚  â”‚  â”‚\n");
 		}
 		else
-			printf("©¤");
+			printf("â”€");
 	}
 
-	printf("\n £Á  £Â  £Ã  £Ä  £Å  £Æ  £Ç  £È  £É\n");
+	printf("\n ï¼¡  ï¼¢  ï¼£  ï¼¤  ï¼¥  ï¼¦  ï¼§  ï¼¨  ï¼©\n");
 
 	char string[MAX_FEN_LENGTH];
 	to_fen(Span(string));
