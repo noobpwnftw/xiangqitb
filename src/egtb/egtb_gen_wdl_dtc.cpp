@@ -1,5 +1,7 @@
 #include "egtb_gen_wdl_dtc.h"
 
+#include "chess/attack.h"
+
 #include "egtb_compress.h"
 
 #include "util/compress.h"
@@ -1194,13 +1196,35 @@ DTC_Intermediate_Entry DTC_Generator::check_remove_lose(
 					else
 						chase_list.add(move);
 
+					Bitboard evt_piecebb, cap_piecebb;
 					if (   !find_chase
 						&& entry.has_flag(DTC_FLAG_CHASE_WIN)
 						&& entry.has_flag(DTC_FLAG_CHASE_LOSE)
-						&& board.is_move_evasion(move)
-						&& board.has_attack_after_quiet_move(move))
+						&& board.is_move_evasion(move, out_param(evt_piecebb))
+						&& board.has_attack_after_quiet_move(move, out_param(cap_piecebb)))
 					{
-						find_chase = true;
+						evt_piecebb &= board.piece_bb(me, ROOK);
+						if (evt_piecebb)
+						{
+							bool find_rook = false;
+							const Square king_pos = board.king_square(me);
+							while (cap_piecebb)
+							{
+								const Square cap_sq = cap_piecebb.pop_first_square();
+								if (   board.piece_type_on(cap_sq) == KNIGHT
+									&& (knight_att_no_mask(cap_sq) & king_pos)
+									&& (evt_piecebb & knight_move_blocker(cap_sq, king_pos)))
+								{
+									find_no_chase = true;
+									find_rook = true;
+									break;
+								}
+							}
+							if (!find_rook)
+								find_chase = true;
+						}
+						else
+							find_chase = true;
 					}
 				}
 			}

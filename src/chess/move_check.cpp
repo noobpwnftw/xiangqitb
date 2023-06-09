@@ -343,8 +343,12 @@ bool Position::is_move_attack(Move move, Move_Legality_Lower_Bound legality)
 	switch (piece_type(cap))
 	{
 	case ROOK:
-		return piece != ROOK
-			|| (!would_be_legal_for_other_side(Move(to, from)) && !is_square_attacked_after_move());
+		if (piece == BISHOP || piece == ADVISOR)
+			return !is_square_attacked_after_move();
+		else if (piece == ROOK)
+			return !would_be_legal_for_other_side(Move(to, from)) && !is_square_attacked_after_move();
+		else
+			return true;
 	case KNIGHT:
 		return (piece != KNIGHT || m_squares[knight_move_blocker(to, from)] || !would_be_legal_for_other_side(Move(to, from)))
 			&& !is_square_attacked_after_move();
