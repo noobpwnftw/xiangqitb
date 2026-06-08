@@ -11,7 +11,6 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <cstdio>
 
 LZ4_Dict::LZ4_Dict(
 	Const_Span<uint8_t> data,

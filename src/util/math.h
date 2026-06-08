@@ -5,7 +5,7 @@
 #include <atomic>
 
 template <typename T>
-NODISCARD INLINE constexpr T ceil_to_multiple(const T& val, const T& alignment)
+NODISCARD constexpr T ceil_to_multiple(const T& val, const T& alignment)
 {
 	const size_t misalignment = val % alignment;
 	if (misalignment == 0)
@@ -36,13 +36,13 @@ NODISCARD constexpr size_t pow_2(size_t e)
 }
 
 template <typename T>
-NODISCARD INLINE constexpr T ceil_div(const T& val, const T& divisor)
+NODISCARD constexpr T ceil_div(const T& val, const T& divisor)
 {
 	return val / divisor + (val % divisor != 0);
 }
 
 template <typename T>
-NODISCARD inline T* align_ptr_up(T* ptr, size_t alignment)
+NODISCARD T* align_ptr_up(T* ptr, size_t alignment)
 {
 	uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
 	v = ceil_to_multiple(v, alignment);
@@ -50,7 +50,7 @@ NODISCARD inline T* align_ptr_up(T* ptr, size_t alignment)
 }
 
 template <typename T>
-NODISCARD inline const T* align_ptr_up(const T* ptr, size_t alignment)
+NODISCARD const T* align_ptr_up(const T* ptr, size_t alignment)
 {
 	uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
 	v = ceil_to_multiple(v, alignment);
@@ -58,7 +58,7 @@ NODISCARD inline const T* align_ptr_up(const T* ptr, size_t alignment)
 }
 
 template <typename T>
-NODISCARD inline bool ptr_is_aligned(const T* ptr, size_t alignment)
+NODISCARD bool ptr_is_aligned(const T* ptr, size_t alignment)
 {
 	return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
 }
@@ -106,7 +106,7 @@ void update_min(T& current_value, const T& new_value)
 }
 
 template<typename T>
-NODISCARD INLINE bool is_mid(const T& m, const T& a, const T& b)
+NODISCARD bool is_mid(const T& m, const T& a, const T& b)
 {
 	return ((m - b) * (a - m) >= 0);
 }

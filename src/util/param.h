@@ -12,17 +12,17 @@ private:
 	using Yes = char;
 	using No = Yes[2];
 
-	template<typename C> static constexpr auto test(void*)
+	template<typename C> NODISCARD static constexpr auto test(void*)
 		-> decltype(std::declval<C>()[std::declval<size_t>()], Yes{});
 
-	template<typename> static constexpr No& test(...);
+	template<typename> NODISCARD static constexpr No& test(...);
 
 public:
 	static constexpr bool value = sizeof(test<T>(0)) == sizeof(Yes);
 };
 
 template <typename T>
-constexpr bool Has_Subscript_Operator = Has_Subscript_Operator_Helper<T>::value;
+inline constexpr bool Has_Subscript_Operator = Has_Subscript_Operator_Helper<T>::value;
 
 template <typename T, template <typename> typename ChildT>
 struct Param_Base
@@ -61,7 +61,7 @@ template <typename T>
 struct Optional_Out_Param final : public Param_Base<T, Optional_Out_Param>
 {
 private:
-	using Base_Type = Param_Base<T, ::Optional_Out_Param>;
+	using Base_Type = Param_Base<T, Optional_Out_Param>;
 
 public:
 	Optional_Out_Param() :
@@ -83,7 +83,7 @@ template <typename T>
 struct Out_Param final : public Param_Base<T, Out_Param>
 {
 private:
-	using Base_Type = Param_Base<T, ::Out_Param>;
+	using Base_Type = Param_Base<T, Out_Param>;
 
 public:
 	explicit Out_Param(T& v) :
@@ -101,13 +101,13 @@ Out_Param<T> Optional_Out_Param<T>::as_mandatory() const
 }
 
 template <typename T>
-Out_Param<T> out_param(T& v)
+NODISCARD Out_Param<T> out_param(T& v)
 {
 	return Out_Param<T>(v);
 }
 
 template <typename T>
-Optional_Out_Param<T> out_param()
+NODISCARD Optional_Out_Param<T> out_param()
 {
 	return Optional_Out_Param<T>();
 }
@@ -119,7 +119,7 @@ template <typename T>
 struct Optional_In_Out_Param final : public Param_Base<T, Optional_In_Out_Param>
 {
 private:
-	using Base_Type = Param_Base<T, ::Optional_In_Out_Param>;
+	using Base_Type = Param_Base<T, Optional_In_Out_Param>;
 
 public:
 	Optional_In_Out_Param() :
@@ -142,7 +142,7 @@ template <typename T>
 struct In_Out_Param final : public Param_Base<T, In_Out_Param>
 {
 private:
-	using Base_Type = Param_Base<T, ::In_Out_Param>;
+	using Base_Type = Param_Base<T, In_Out_Param>;
 
 public:
 	explicit In_Out_Param(T& v) :

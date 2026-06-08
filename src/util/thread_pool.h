@@ -19,7 +19,7 @@ struct Thread_Pool
 	explicit Thread_Pool(size_t num_threads)
 	{
 		for (size_t i = 0; i < num_threads; ++i)
-			m_workers.emplace_back(i);
+			m_workers.emplace_back();
 	}
 
 	template <typename F>
@@ -29,14 +29,19 @@ struct Thread_Pool
 		auto promise = std::make_shared<std::promise<RetT>>();
 		std::future<RetT> future = promise->get_future();
 		m_workers[i].enqueue_task([job = std::forward<F>(job), promise = std::move(promise)]() mutable {
-			if constexpr (std::is_same_v<RetT, void>)
-			{
-				job();
-				promise->set_value();
+			try {
+				if constexpr (std::is_same_v<RetT, void>)
+				{
+					job();
+					promise->set_value();
+				}
+				else
+				{
+					promise->set_value(job());
+				}
 			}
-			else
-			{
-				promise->set_value(job());
+			catch (...) {
+				promise->set_exception(std::current_exception());
 			}
 		});
 		return future;
@@ -103,7 +108,7 @@ struct Thread_Pool
 		auto futures = run_async_task_on_multiple_threads(thread_use, std::forward<F>(job));
 
 		for (auto&& future : futures)
-			future.wait();
+			future.get();
 	}
 
 	NODISCARD size_t num_workers() const
@@ -115,8 +120,7 @@ private:
 
 	struct Worker_Thread
 	{
-		explicit Worker_Thread(size_t index) :
-			m_thread_id(index)
+		Worker_Thread()
 		{
 			m_quit.store(false);
 			m_thread = std::thread([this]() { thread_entry(); });
@@ -174,7 +178,6 @@ private:
 
 	private:
 		std::thread m_thread;
-		size_t m_thread_id;
 
 		mutable std::condition_variable m_task_or_quit;
 		mutable std::condition_variable m_no_tasks;

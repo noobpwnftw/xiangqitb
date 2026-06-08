@@ -6,14 +6,12 @@
 #include <windows.h>
 #endif
 
-#include <immintrin.h>
-
 void atomic_fetch_or(uint8_t* p, uint8_t v)
 {
 #if defined(OS_WINDOWS)
 	InterlockedOr8(reinterpret_cast<volatile char*>(p), v);
 #else
-	__sync_fetch_and_or(p, v);
+	__atomic_fetch_or(p, v, __ATOMIC_RELAXED);
 #endif
 }
 
@@ -22,7 +20,7 @@ void atomic_fetch_or(uint16_t* p, uint16_t v)
 #if defined(OS_WINDOWS)
 	InterlockedOr16(reinterpret_cast<volatile SHORT*>(p), v);
 #else
-	__sync_fetch_and_or(p, v);
+	__atomic_fetch_or(p, v, __ATOMIC_RELAXED);
 #endif
 }
 
@@ -31,7 +29,7 @@ void atomic_fetch_or(uint32_t* p, uint32_t v)
 #if defined(OS_WINDOWS)
 	InterlockedOr(reinterpret_cast<volatile LONG*>(p), v);
 #else
-	__sync_fetch_and_or(p, v);
+	__atomic_fetch_or(p, v, __ATOMIC_RELAXED);
 #endif
 }
 
@@ -40,7 +38,7 @@ void atomic_fetch_or(uint64_t* p, uint64_t v)
 #if defined(OS_WINDOWS)
 	InterlockedOr64(reinterpret_cast<volatile LONG64*>(p), v);
 #else
-	__sync_fetch_and_or(p, v);
+	__atomic_fetch_or(p, v, __ATOMIC_RELAXED);
 #endif
 }
 

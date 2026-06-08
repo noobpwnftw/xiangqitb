@@ -5,7 +5,6 @@
 #include <utility>
 #include <string>
 #include <chrono>
-#include <cstring>
 #include <vector>
 #include <cstdio>
 
@@ -43,19 +42,19 @@ NODISCARD INLINE std::string strip(const std::string& s, const char ws[] = " \t\
 }
 
 template <typename T>
-NODISCARD INLINE double elapsed_milliseconds(T start_time, T end_time)
+NODISCARD double elapsed_milliseconds(T start_time, T end_time)
 {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count() / 1e6;
 }
 
 template <typename T>
-NODISCARD INLINE double elapsed_seconds(T start_time, T end_time)
+NODISCARD double elapsed_seconds(T start_time, T end_time)
 {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count() / 1e9;
 }
 
 template <typename T>
-NODISCARD INLINE std::string format_elapsed_time(T start_time, T end_time)
+NODISCARD std::string format_elapsed_time(T start_time, T end_time)
 {
 	const size_t t = static_cast<size_t>(elapsed_milliseconds(start_time, end_time));
 	const size_t ms = t % 1000;
@@ -69,8 +68,12 @@ NODISCARD INLINE std::string format_elapsed_time(T start_time, T end_time)
 }
 
 template <typename... T>
-[[noreturn]] inline void print_and_abort(T&&... args)
+[[noreturn]] void print_and_abort(const char* fmt, T&&... args)
 {
-	printf(std::forward<T>(args)...);
+	if constexpr (sizeof...(T) == 0)
+		fputs(fmt, stdout);
+	else
+		printf(fmt, std::forward<T>(args)...);
+	fflush(stdout);
 	abort();
 }

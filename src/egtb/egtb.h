@@ -14,8 +14,6 @@
 #include <memory>
 #include <filesystem>
 #include <mutex>
-#include <immintrin.h>
-#include <emmintrin.h>
 #include <variant>
 
 // If USE_LARGE_INDEX is defined then Piece_Group::Placement_Index 
@@ -149,7 +147,7 @@ struct Piece_Group
 
 		void mirror_files()
 		{
-			for (size_t i = 0; i < m_size; ++i)
+			for (size_t i = 0; i < size(); ++i)
 				m_squares[i] = sq_file_mirror(m_squares[i]);
 		}
 
@@ -162,7 +160,7 @@ struct Piece_Group
 
 		INLINE void mirror_ranks()
 		{
-			for (size_t i = 0; i < m_size; ++i)
+			for (size_t i = 0; i < size(); ++i)
 				m_squares[i] = sq_rank_mirror(m_squares[i]);
 		}
 
@@ -176,7 +174,7 @@ struct Piece_Group
 		NODISCARD bool are_all_squares_unique() const
 		{
 			bool arr[SQUARE_NB] = { 0 };
-			for (size_t i = 0; i < m_size; ++i)
+			for (size_t i = 0; i < size(); ++i)
 			{
 				const Square sq = m_squares[i];
 				if (arr[sq])
@@ -189,20 +187,9 @@ struct Piece_Group
 		// Returns a copy of this placement with the square `from` replaced with the square `to`.
 		NODISCARD INLINE Placement with_moved_square(Square from, Square to) const
 		{
-			// This is a commonly used function and we do gain slightly from a branchless implementation.
-
-			static_assert(sizeof(Placement) - offsetof(Placement, m_squares) >= 8);
-
 			Placement list;
-			const __m128i from_x16 = _mm_set1_epi8(from);
-			const __m128i to_x16 = _mm_set1_epi8(to);
-			// Can't load full 16 bytes, so we load one half and rely on the compiler optimizing it.
-			const __m128i squares = _mm_set_epi64x(0, *reinterpret_cast<const int64_t*>(m_squares));
-			// We blend the broadcasted `to` squares in wherever the square was equal to `from`.
-			// This can in some cases also alter the size, since we load full 8 bytes into the registers.
-			// For this reason we assign size last.
-			const __m128i replaced = _mm_blendv_epi8(squares, to_x16, _mm_cmpeq_epi8(squares, from_x16));
-			*reinterpret_cast<int64_t*>(list.m_squares) = _mm_cvtsi128_si64(replaced);
+			for (size_t i = 0; i < MAX_PIECE_GROUP_SIZE; ++i)
+				list.m_squares[i] = (m_squares[i] == from) ? to : m_squares[i];
 			list.m_size = m_size;
 			return list;
 		}
@@ -212,7 +199,7 @@ struct Piece_Group
 		NODISCARD INLINE Placement with_removed_square(Square to_remove) const
 		{
 			Placement list;
-			for (size_t i = 0; i < m_size; ++i)
+			for (size_t i = 0; i < size(); ++i)
 				if (m_squares[i] != to_remove)
 					list.add(m_squares[i]);
 			return list;
@@ -221,19 +208,19 @@ struct Piece_Group
 		// Appends a square to the end of the list.
 		INLINE void add(Square s)
 		{
-			ASSERT(m_size < MAX_PIECE_GROUP_SIZE);
+			ASSERT(size() < MAX_PIECE_GROUP_SIZE);
 			m_squares[m_size++] = s;
 		}
 
 		NODISCARD INLINE Square& operator[](size_t index)
 		{
-			ASSERT(index < m_size);
+			ASSERT(index < size());
 			return m_squares[index];
 		}
 
 		NODISCARD INLINE Square operator[](size_t index) const
 		{
-			ASSERT(index < m_size);
+			ASSERT(index < size());
 			return m_squares[index];
 		}
 
@@ -1260,7 +1247,7 @@ struct EGTB_File_For_Probe
 	using Underlying_Entry_Type = Unsigned_Int_Of_Size<ENTRY_SIZE>;
 
 	friend void load_egtb_table(
-		Out_Param<EGTB_File_For_Probe<MainEntryT, OtherEntryTs...>> egtb,
+		Out_Param<EGTB_File_For_Probe<DTM_Final_Entry>> egtb,
 		const Piece_Config& ps,
 		std::filesystem::path sub_evtb,
 		const std::filesystem::path tmp[COLOR_NB],
@@ -1310,8 +1297,8 @@ struct EGTB_File_For_Probe
 
 	void close()
 	{
-		m_files[WHITE].close();
-		m_files[BLACK].close();
+		m_files[WHITE].close_file();
+		m_files[BLACK].close_file();
 		m_tmp_files.clear();
 		m_is_singular_draw[WHITE] = m_is_singular_draw[BLACK] = false;
 	}
@@ -1399,8 +1386,8 @@ struct EGTB_File_For_Probe<WDL_Entry>
 
 	void close()
 	{
-		m_files[WHITE].close();
-		m_files[BLACK].close();
+		m_files[WHITE].close_file();
+		m_files[BLACK].close_file();
 		m_tmp_files.clear();
 		m_is_singular[WHITE] = m_is_singular[BLACK] = false;
 		m_single_val[WHITE] = m_single_val[BLACK] = WDL_Entry::DRAW;
@@ -1440,7 +1427,8 @@ struct EGTB_Info
 
 	void maybe_update_longest_win(Color color, size_t idx, size_t value)
 	{
-		if (value > longest_win[color])
+		if (value > longest_win[color]
+			|| (value == longest_win[color] && idx < longest_idx[color]))
 		{
 			longest_win[color] = narrowing_static_cast<uint16_t>(value);
 			longest_idx[color] = idx;

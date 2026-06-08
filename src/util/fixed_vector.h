@@ -304,8 +304,8 @@ public:
     {
         ASSERT(m_size > 0);
 
+        (*this)[m_size - 1].~T();
         --m_size;
-        (*this)[m_size].~T();
     }
 
 private:

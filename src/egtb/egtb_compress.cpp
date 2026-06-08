@@ -345,7 +345,7 @@ void save_evtb_table(
 
 	writer.write_end_checksum(static_cast<uint64_t>(EGTB_CHECKSUM_INIT_VALUE));
 
-	write_map.close();
+	write_map.close_file();
 }
 
 void save_egtb_table(
@@ -447,7 +447,7 @@ void save_egtb_table(
 
 	writer.write_end_checksum(static_cast<uint64_t>(EGTB_CHECKSUM_INIT_VALUE));
 
-	write_map.close();
+	write_map.close_file();
 }
 
 Compressed_EGTB::Compressed_EGTB(

@@ -17,21 +17,21 @@ struct Const_Span
 	}
 
 	template <size_t N>
-	constexpr explicit Const_Span(const T(&arr)[N]) :
+	NODISCARD constexpr explicit Const_Span(const T(&arr)[N]) :
 		m_begin(arr),
 		m_end(arr + N)
 	{
 	}
 
 	template <size_t N>
-	constexpr explicit Const_Span(const T(*arr)[N]) :
+	NODISCARD constexpr explicit Const_Span(const T(*arr)[N]) :
 		m_begin(arr),
 		m_end(arr + N)
 	{
 	}
 
 	template <typename ContT>
-	constexpr explicit Const_Span(const ContT& container) :
+	NODISCARD constexpr explicit Const_Span(const ContT& container) :
 		m_begin(&*container.begin()),
 		m_end(m_begin + container.size())
 	{
@@ -129,21 +129,21 @@ struct Span
 	}
 
 	template <size_t N>
-	constexpr explicit Span(T(&arr)[N]) :
+	NODISCARD constexpr explicit Span(T(&arr)[N]) :
 		m_begin(arr),
 		m_end(arr + N)
 	{
 	}
 
 	template <size_t N>
-	constexpr explicit Span(T(*arr)[N]) :
+	NODISCARD constexpr explicit Span(T(*arr)[N]) :
 		m_begin(arr),
 		m_end(arr + N)
 	{
 	}
 
 	template <typename ContT>
-	constexpr explicit Span(ContT& container) :
+	NODISCARD constexpr explicit Span(ContT& container) :
 		m_begin(&*container.begin()),
 		m_end(m_begin + container.size())
 	{

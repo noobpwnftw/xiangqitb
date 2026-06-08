@@ -10,13 +10,13 @@
 #include <utility>
 
 template <typename HeadT>
-NODISCARD inline std::filesystem::path path_join(HeadT&& p)
+NODISCARD std::filesystem::path path_join(HeadT&& p)
 {
 	return std::move(std::forward<HeadT>(p));
 }
 
 template <typename HeadT, typename... ArgsTs>
-NODISCARD inline std::filesystem::path path_join(HeadT&& head, ArgsTs&&... args)
+NODISCARD std::filesystem::path path_join(HeadT&& head, ArgsTs&&... args)
 {
 	return std::filesystem::path(std::forward<HeadT>(head)) / path_join(std::forward<ArgsTs>(args)...);
 }
@@ -64,7 +64,7 @@ struct Memory_Mapped_File
 	Memory_Mapped_File() :
 		m_data(nullptr),
 		m_size(0),
-		m_handle(sys_common::INVALID_HANLE_VALUE),
+		m_handle(sys_common::INVALID_HANDLE_VALUE),
 		m_advise(Access_Advice::NORMAL)
 	{
 	}
@@ -72,7 +72,7 @@ struct Memory_Mapped_File
 	explicit Memory_Mapped_File(Access_Advice access) :
 		m_data(nullptr),
 		m_size(0),
-		m_handle(sys_common::INVALID_HANLE_VALUE),
+		m_handle(sys_common::INVALID_HANDLE_VALUE),
 		m_advise(access)
 	{
 	}
@@ -81,7 +81,7 @@ struct Memory_Mapped_File
 	Memory_Mapped_File(Memory_Mapped_File&& other) noexcept :
 		m_data(std::exchange(other.m_data, nullptr)),
 		m_size(std::exchange(other.m_size, 0)),
-		m_handle(std::exchange(other.m_handle, sys_common::INVALID_HANLE_VALUE)),
+		m_handle(std::exchange(other.m_handle, sys_common::INVALID_HANDLE_VALUE)),
 		m_advise(std::exchange(other.m_advise, Access_Advice::NORMAL))
 	{
 	}
@@ -89,16 +89,20 @@ struct Memory_Mapped_File
 	Memory_Mapped_File& operator=(const Memory_Mapped_File&) = delete;
 	Memory_Mapped_File& operator=(Memory_Mapped_File&& other) noexcept
 	{
-		m_data = std::exchange(other.m_data, nullptr);
-		m_size = std::exchange(other.m_size, 0);
-		m_handle = std::exchange(other.m_handle, sys_common::INVALID_HANLE_VALUE);
-		m_advise = std::exchange(other.m_advise, Access_Advice::NORMAL);
+		if (this != &other)
+		{
+			close_file();
+			m_data = std::exchange(other.m_data, nullptr);
+			m_size = std::exchange(other.m_size, 0);
+			m_handle = std::exchange(other.m_handle, sys_common::INVALID_HANDLE_VALUE);
+			m_advise = std::exchange(other.m_advise, Access_Advice::NORMAL);
+		}
 		return *this;
 	}
 
 	~Memory_Mapped_File()
 	{
-		close();
+		close_file();
 	}
 
 	bool open_readonly(const std::filesystem::path& path)
@@ -117,7 +121,7 @@ struct Memory_Mapped_File
 
 	bool create(const char* file_name, size_t size);
 
-	void close();
+	void close_file();
 
 	NODISCARD Span<uint8_t> data_span()
 	{

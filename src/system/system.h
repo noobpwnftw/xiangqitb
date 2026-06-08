@@ -15,7 +15,7 @@
 namespace sys_common
 {
     using Native_Handle = void*;
-    const Native_Handle INVALID_HANLE_VALUE = (Native_Handle)(-1);
+    const Native_Handle INVALID_HANDLE_VALUE = (Native_Handle)(-1);
 }
 
 #elif defined (__linux__)
@@ -25,7 +25,7 @@ namespace sys_common
 namespace sys_common
 {
     using Native_Handle = int;
-    const Native_Handle INVALID_HANLE_VALUE = -1;
+    const Native_Handle INVALID_HANDLE_VALUE = -1;
 }
 
 #else

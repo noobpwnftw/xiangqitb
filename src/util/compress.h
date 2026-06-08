@@ -20,14 +20,15 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
-#include <optional>
-#include <utility>
 #include <functional>
 #include <vector>
 
 // Represents an lz4 dictionary.
 struct LZ4_Dict
 {
+	// Empty dictionary (used as a placeholder before load/make is called).
+	LZ4_Dict() = default;
+
 	// Copies the raw dictionary data from given memory span.
 	NODISCARD static LZ4_Dict load(Const_Span<uint8_t> data)
 	{
@@ -179,7 +180,7 @@ struct LZMA_Compress_Helper : public Compress_Helper
 		return size + size / 10 + 65536 + LZMA_PROPS_SIZE;
 	}
 
-	NODISCARD std::vector<uint8_t> compress(Const_Span<uint8_t> src);
+	NODISCARD std::vector<uint8_t> compress(Const_Span<uint8_t> src) override;
 
 	NODISCARD size_t compress(Span<uint8_t> dest, Const_Span<uint8_t> src) override
 	{

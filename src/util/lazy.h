@@ -37,13 +37,13 @@ struct Lazy_Cached_Value : FuncT
 	const Value_Type* operator->() const
 	{
 		ensure_initialized();
-		return reinterpret_cast<const Value_Type*>(m_value);
+		return reinterpret_cast<const Value_Type*>(&m_value);
 	}
 
 	Value_Type* operator->()
 	{
 		ensure_initialized();
-		return reinterpret_cast<Value_Type*>(m_value);
+		return reinterpret_cast<Value_Type*>(&m_value);
 	}
 
 	const Value_Type& value() const

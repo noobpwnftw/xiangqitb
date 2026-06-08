@@ -1,9 +1,7 @@
 #pragma once
 
 #include "defines.h"
-#include "math.h"
 #include "span.h"
-#include "enum.h"
 
 #include <memory>
 #include <type_traits>
@@ -13,14 +11,14 @@
 namespace cpp20
 {
 	template <typename>
-	constexpr bool is_unbounded_array_v = false;
+	inline constexpr bool is_unbounded_array_v = false;
 	template <typename T>
-	constexpr bool is_unbounded_array_v<T[]> = true;
+	inline constexpr bool is_unbounded_array_v<T[]> = true;
 
 	template <typename>
-	constexpr bool is_bounded_array_v = false;
+	inline constexpr bool is_bounded_array_v = false;
 	template <typename T, size_t N>
-	constexpr bool is_bounded_array_v<T[N]> = true;
+	inline constexpr bool is_bounded_array_v<T[N]> = true;
 }
 
 NODISCARD void* allocate_large_pages(size_t bytes);
@@ -180,7 +178,7 @@ private:
 namespace cpp20
 {
 	template <typename T>
-	NODISCARD inline
+	NODISCARD INLINE
 	std::enable_if_t<
 		cpp20::is_unbounded_array_v<T>,
 		std::unique_ptr<T>

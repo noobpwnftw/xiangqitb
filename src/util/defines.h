@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <new>
 #include <type_traits>
 
@@ -11,8 +12,8 @@
 using std::hardware_constructive_interference_size;
 using std::hardware_destructive_interference_size;
 #else
-constexpr std::size_t hardware_constructive_interference_size = 64;
-constexpr std::size_t hardware_destructive_interference_size = 64;
+inline constexpr std::size_t hardware_constructive_interference_size = 64;
+inline constexpr std::size_t hardware_destructive_interference_size = 64;
 #endif
 
 #if defined(NDEBUG)
@@ -31,12 +32,16 @@ constexpr std::size_t hardware_destructive_interference_size = 64;
 
 #if defined(_MSC_VER)
 #define NOINLINE __declspec(noinline)
+#define FORCE_INLINE __forceinline
+#define FORCE_INLINE_LAMBDA
 #else
 #define NOINLINE __attribute__ ((noinline))
+#define FORCE_INLINE inline __attribute__ ((always_inline))
+#define FORCE_INLINE_LAMBDA __attribute__ ((always_inline))
 #endif
 
 #if defined(NDEBUG)
-constexpr inline void NOINLINE ASSERT_ALWAYS(bool a)
+inline constexpr void NOINLINE ASSERT_ALWAYS(bool a)
 {
 	if (!a)
 		abort();
@@ -70,7 +75,7 @@ using Unsigned_Int_Of_Size =
 template <typename T>
 using Identity = T;
 
-constexpr size_t CACHE_LINE_SIZE = hardware_destructive_interference_size;
+inline constexpr size_t CACHE_LINE_SIZE = hardware_destructive_interference_size;
 
 template <typename ToT, typename FromT>
 NODISCARD constexpr ToT narrowing_static_cast(FromT from)

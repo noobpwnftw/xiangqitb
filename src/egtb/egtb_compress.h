@@ -13,10 +13,10 @@
 #include <vector>
 #include <optional>
 
-constexpr uint8_t EGTB_SINGULAR_FLAG = 0x80;
-constexpr uint64_t EGTB_CHECKSUM_INIT_VALUE = 0xf0f0f0f0f0f0;
+inline constexpr uint8_t EGTB_SINGULAR_FLAG = 0x80;
+inline constexpr uint64_t EGTB_CHECKSUM_INIT_VALUE = 0xf0f0f0f0f0f0;
 
-constexpr size_t WDL_BLOCK_SIZE = 64 * 1024;
+inline constexpr size_t WDL_BLOCK_SIZE = 64 * 1024;
 
 struct Compressed_EGTB
 {

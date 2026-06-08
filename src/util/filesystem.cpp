@@ -33,11 +33,11 @@ bool Memory_Mapped_File::open_readonly(const char* file_name)
 		FILE_SHARE_READ,
 		NULL,
 		OPEN_EXISTING,
-		FILE_ATTRIBUTE_NORMAL,
+		FILE_ATTRIBUTE_NORMAL | (m_advise == Access_Advice::RANDOM ? FILE_FLAG_RANDOM_ACCESS : 0),
 		NULL
 	);
 
-	if (m_handle == sys_common::INVALID_HANLE_VALUE)
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
 		return false;
 
 	m_size = std::filesystem::file_size(file_name);
@@ -54,8 +54,8 @@ bool Memory_Mapped_File::open_readonly(const char* file_name)
 #elif defined(OS_LINUX)
 
 	struct stat statbuf;
-	m_handle = ::open(file_name, O_RDONLY);
-	if (m_handle == sys_common::INVALID_HANLE_VALUE)
+	m_handle = open(file_name, O_RDONLY);
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
 		return false;
 
 	fstat(m_handle, &statbuf);
@@ -64,6 +64,9 @@ bool Memory_Mapped_File::open_readonly(const char* file_name)
 
 	if (m_data == MAP_FAILED)
 		print_and_abort("Could not mmap() %s\n", file_name);
+
+	if (m_advise == Access_Advice::RANDOM)
+		madvise(m_data, m_size, MADV_RANDOM);
 
 	return true;
 
@@ -88,7 +91,7 @@ bool Memory_Mapped_File::create(const char* file_name, size_t size)
 		NULL
 	);
 
-	if (m_handle == sys_common::INVALID_HANLE_VALUE)
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
 		return false;
 
 	std::filesystem::resize_file(file_name, size);
@@ -108,8 +111,8 @@ bool Memory_Mapped_File::create(const char* file_name, size_t size)
 
 #elif defined(OS_LINUX)
 
-	m_handle = ::open(file_name, O_CREAT | O_RDWR | O_TRUNC, (mode_t)0644);
-	if (m_handle == sys_common::INVALID_HANLE_VALUE)
+	m_handle = open(file_name, O_CREAT | O_RDWR | O_TRUNC, (mode_t)0644);
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
 		return false;
 
 	m_size = size;
@@ -135,7 +138,7 @@ bool Memory_Mapped_File::create(const char* file_name, size_t size)
 #endif
 }
 
-void Memory_Mapped_File::close()
+void Memory_Mapped_File::close_file()
 {
 #if defined(OS_WINDOWS)
 
@@ -145,10 +148,10 @@ void Memory_Mapped_File::close()
 		m_data = nullptr;
 	}
 
-	if (m_handle != sys_common::INVALID_HANLE_VALUE)
+	if (m_handle != sys_common::INVALID_HANDLE_VALUE)
 	{
 		CloseHandle(m_handle);
-		m_handle = sys_common::INVALID_HANLE_VALUE;
+		m_handle = sys_common::INVALID_HANDLE_VALUE;
 	}
 
 #elif defined(OS_LINUX)
@@ -162,10 +165,10 @@ void Memory_Mapped_File::close()
 		m_data = nullptr;
 	}
 
-	if (m_handle != sys_common::INVALID_HANLE_VALUE)
+	if (m_handle != sys_common::INVALID_HANDLE_VALUE)
 	{
-		::close(m_handle);
-		m_handle = sys_common::INVALID_HANLE_VALUE;
+		close(m_handle);
+		m_handle = sys_common::INVALID_HANDLE_VALUE;
 	}
 
 #else
@@ -173,4 +176,6 @@ void Memory_Mapped_File::close()
 #error "Unsupported OS"
 
 #endif
+
+	m_size = 0;
 }

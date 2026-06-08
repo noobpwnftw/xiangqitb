@@ -921,8 +921,7 @@ void DTM_Generator::gen_rule_lose(In_Out_Param<Thread_Pool> thread_pool, In_Out_
 		EGTB_Bits me_bits = tmp_bits->acquire_dirty();
 
 		find_rule_lose(thread_pool, me, out_param(me_bits), out_param(opp_bits));
-		
-		size_t i = 0;
+
 		for (;;)
 		{
 			if (!remove_rule_lose(thread_pool, me, color_opp(me), inout_param(opp_bits), me_bits))
@@ -1206,11 +1205,7 @@ EGTB_Info DTM_Generator::sp_check_dtm_egtb(In_Out_Param<Shared_Board_Index_Itera
 
 				info.win_cnt[c] += 1;
 
-				if (entry.score() > info.longest_win[c])
-				{
-					info.longest_win[c] = narrowing_static_cast<uint16_t>(entry.score());
-					info.longest_idx[c] = current_pos;
-				}
+				info.maybe_update_longest_win(c, current_pos, entry.score());
 			}
 			else
 				on_wrong_result("NONE");
