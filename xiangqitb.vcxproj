@@ -128,7 +128,9 @@
     <ClInclude Include="src\system\system.h" />
     <ClInclude Include="src\util\algo.h" />
     <ClInclude Include="src\util\allocation.h" />
+    <ClInclude Include="src\util\checksum.h" />
     <ClInclude Include="src\util\compress.h" />
+    <ClInclude Include="src\util\decompress.h" />
     <ClInclude Include="src\util\defines.h" />
     <ClInclude Include="src\util\dispatch.h" />
     <ClInclude Include="src\util\division.h" />

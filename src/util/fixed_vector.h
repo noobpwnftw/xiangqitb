@@ -259,12 +259,6 @@ public:
         return CAPACITY;
     }
 
-    void reserve(size_type n)
-    {
-        // do nothing
-        // it's for interface compatibility
-    }
-
     void clear()
     {
         for (size_type i = 0; i < m_size; ++i)
@@ -304,8 +298,8 @@ public:
     {
         ASSERT(m_size > 0);
 
+        (*this)[m_size - 1].~T();
         --m_size;
-        (*this)[m_size].~T();
     }
 
 private:

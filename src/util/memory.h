@@ -1,9 +1,9 @@
 #pragma once
 
 #include "defines.h"
+#include "endian.h"
 #include "span.h"
-
-#include "zstd/common/xxhash.h"
+#include "utility.h"
 
 struct Serial_Memory_Writer
 {
@@ -13,8 +13,6 @@ struct Serial_Memory_Writer
 		m_end(span.end())
 	{}
 
-	// Prevent type deduction so that it must be specified explicitly.
-	// This is to avoid mistakes where the type passed is not desired.
 	template <typename T>
 	void write(const Identity<T>& val)
 	{
@@ -30,15 +28,12 @@ struct Serial_Memory_Writer
 		m_caret += data.size();
 	}
 
-	void write_end_checksum(uint64_t init)
+	NODISCARD Span<uint8_t> reserve(size_t bytes)
 	{
-		ASSERT(std::distance(m_begin, m_end) >= 8);
-		const uint64_t hash_data = XXH64(
-			m_begin,
-			num_bytes_written(),
-			init
-		);
-		reinterpret_cast<uint64_t*>(m_end - 8)[0] = hash_data;
+		ASSERT(m_caret + bytes <= m_end);
+		uint8_t* const begin = m_caret;
+		m_caret += bytes;
+		return Span<uint8_t>(begin, bytes);
 	}
 
 	void zero_align(size_t alignment)
@@ -106,10 +101,9 @@ struct Serial_Memory_Reader
 	template <typename T>
 	NODISCARD T read()
 	{
-		T val;
-		ASSERT(m_caret + sizeof(val) <= m_end);
-		std::memcpy(&val, m_caret, sizeof(val));
-		m_caret += sizeof(val);
+		ASSERT(m_caret + sizeof(T) <= m_end);
+		const T val = read_le<T>(m_caret);
+		m_caret += sizeof(T);
 		return val;
 	}
 
@@ -118,14 +112,6 @@ struct Serial_Memory_Reader
 		ASSERT(m_caret + dst.size() <= m_end);
 		std::memcpy(dst.begin(), m_caret, dst.size());
 		m_caret += dst.size();
-	}
-
-	NODISCARD bool is_end_checksum_ok(uint64_t init) const
-	{
-		if (std::distance(m_begin, m_end) < 8)
-			return false;
-		const uint64_t crc = reinterpret_cast<const uint64_t*>(m_end - 8)[0];
-		return XXH64(m_begin, std::distance(m_begin, m_end) - 8, init) == crc;
 	}
 
 	void advance(size_t size)

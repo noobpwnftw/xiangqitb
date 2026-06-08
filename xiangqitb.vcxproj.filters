@@ -404,7 +404,13 @@
     <ClInclude Include="src\util\memory.h">
       <Filter>src\util</Filter>
     </ClInclude>
+    <ClInclude Include="src\util\checksum.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
     <ClInclude Include="src\util\compress.h">
+      <Filter>src\util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\util\decompress.h">
       <Filter>src\util</Filter>
     </ClInclude>
     <ClInclude Include="src\egtb\egtb.h">

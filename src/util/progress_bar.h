@@ -32,8 +32,6 @@ struct Concurrent_Progress_Bar
 	{
 		const size_t curr = m_current.fetch_add(n) + n;
 
-		// Since last_print can only increase we can do an early check
-		// before the critical section.
 		if (curr < m_last_print.load() + m_print_period)
 			return *this;
 

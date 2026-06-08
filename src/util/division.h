@@ -35,15 +35,14 @@ struct Divider<uint64_t>
 		}
 	}
 
-	NODISCARD friend inline uint64_t operator/(uint64_t n, const Divider& div)
+	NODISCARD friend uint64_t operator/(uint64_t n, const Divider& div)
 	{
 		const uint64_t q = mulhi_epu64(div.m_magic, n);
 
 		if constexpr (ASSUME_NO_OVERFLOW)
 		{
-			// We use a faster path that assumes (n + q) does not overlow.
 			ASSERT(n < std::numeric_limits<size_t>::max() / 2);
-			return (n + q) >> div.m_shift; // + 1 preadded during construction
+			return (n + q) >> div.m_shift;
 		}
 		else
 		{
@@ -51,8 +50,7 @@ struct Divider<uint64_t>
 		}
 	}
 
-	// Overload of operator /= for scalar division
-	friend inline uint64_t& operator/=(uint64_t& n, const Divider& div)
+	friend uint64_t& operator/=(uint64_t& n, const Divider& div)
 	{
 		return n = n / div;
 	}

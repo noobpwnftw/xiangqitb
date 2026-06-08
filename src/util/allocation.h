@@ -3,7 +3,6 @@
 #include "defines.h"
 #include "math.h"
 #include "span.h"
-#include "enum.h"
 
 #include <memory>
 #include <type_traits>
@@ -13,18 +12,27 @@
 namespace cpp20
 {
 	template <typename>
-	constexpr bool is_unbounded_array_v = false;
+	inline constexpr bool is_unbounded_array_v = false;
 	template <typename T>
-	constexpr bool is_unbounded_array_v<T[]> = true;
+	inline constexpr bool is_unbounded_array_v<T[]> = true;
 
 	template <typename>
-	constexpr bool is_bounded_array_v = false;
+	inline constexpr bool is_bounded_array_v = false;
 	template <typename T, size_t N>
-	constexpr bool is_bounded_array_v<T[N]> = true;
+	inline constexpr bool is_bounded_array_v<T[N]> = true;
 }
 
 NODISCARD void* allocate_large_pages(size_t bytes);
-void deallocate_large_pages(void* ptr);
+void deallocate_large_pages(void* ptr, size_t bytes);
+void release_unused_heap_memory();
+
+// Assumed 2MiB, hard to retrieve programmatically.
+inline constexpr size_t LARGE_PAGE_SIZE = 2048 * 1024;
+
+NODISCARD constexpr size_t large_page_bytes(size_t bytes)
+{
+	return ceil_to_multiple(bytes, LARGE_PAGE_SIZE);
+}
 
 template <typename T>
 struct Huge_Array
@@ -116,7 +124,7 @@ struct Huge_Array
 				for (size_t i = 0; i < m_size; ++i)
 					m_data[i].~T();
 
-			deallocate_large_pages(m_data);
+			deallocate_large_pages(m_data, sizeof(T) * m_size);
 		}
 		else
 			delete[] m_data;
@@ -180,7 +188,7 @@ private:
 namespace cpp20
 {
 	template <typename T>
-	NODISCARD inline
+	NODISCARD INLINE
 	std::enable_if_t<
 		cpp20::is_unbounded_array_v<T>,
 		std::unique_ptr<T>

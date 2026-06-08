@@ -1,9 +1,7 @@
 #pragma once
 
+#include <stdexcept>
 #include <tuple>
-#include <cstddef>
-#include <cstdint>
-#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -13,8 +11,8 @@ struct Template_Dispatch {
 
     Template_Dispatch() = delete;
 
-    Template_Dispatch(T value) :
-        value(value)
+    Template_Dispatch(T v) :
+        value(v)
     {
     }
 

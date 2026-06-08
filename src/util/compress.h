@@ -10,31 +10,34 @@
 
 #include "LZMA/LzmaLib.h"
 
+#include "util/decompress.h"
 #include "util/defines.h"
+#include "util/filesystem.h"
+#include "util/progress_bar.h"
 #include "util/span.h"
 #include "util/thread_pool.h"
 #include "util/param.h"
 
+#include <atomic>
+#include <climits>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
-#include <optional>
-#include <utility>
-#include <functional>
+#include <mutex>
 #include <vector>
 
-// Represents an lz4 dictionary.
 struct LZ4_Dict
 {
-	// Copies the raw dictionary data from given memory span.
+	LZ4_Dict() = default;
+
 	NODISCARD static LZ4_Dict load(Const_Span<uint8_t> data)
 	{
 		return LZ4_Dict(data);
 	}
 
-	// Creates a dictionary for given data, divided into samples of sample_size.
 	// The sample size must divide the size of the data.
 	// The dictionary will be of size <=dict_size bytes.
 	NODISCARD static LZ4_Dict make(
@@ -76,29 +79,19 @@ private:
 	);
 };
 
-// A polymorphic compressor.
 struct Compress_Helper
 {
-	// Returns the maximum compressed size for any data of given size.
 	NODISCARD virtual size_t compress_bound(size_t size) const = 0;
 
-	// Compresses the given source block.
-	// Returns the compressed block as a vector with capacity equal to size.
 	NODISCARD virtual std::vector<uint8_t> compress(Const_Span<uint8_t> src) = 0;
 
-	// Compresses the given source block into the destination.
-	// Returns the number of bytes in the compressed data.
-	// Throws std::runtime_error on any error.
 	NODISCARD virtual size_t compress(Span<uint8_t> dest, Const_Span<uint8_t> src) = 0;
 
-	// Clones this compressor. Useful for ensuring stateful compressors (like LZ4)
-	// don't have shared state in multithreaded contexts.
 	NODISCARD virtual std::unique_ptr<Compress_Helper> clone() const = 0;
 
 	virtual ~Compress_Helper() {};
 };
 
-// A compressor utilizing LZ4.
 // It is not thread safe. Use it as a factory and clone() when to be
 // used in a multithreaded context.
 struct LZ4_Compress_Helper : public Compress_Helper
@@ -163,7 +156,6 @@ private:
 	const LZ4_Dict* m_dict;
 };
 
-// A compressor utilizing LZMA.
 struct LZMA_Compress_Helper : public Compress_Helper
 {
 	static constexpr unsigned int DICT_SIZE = 1 << 20;
@@ -179,7 +171,7 @@ struct LZMA_Compress_Helper : public Compress_Helper
 		return size + size / 10 + 65536 + LZMA_PROPS_SIZE;
 	}
 
-	NODISCARD std::vector<uint8_t> compress(Const_Span<uint8_t> src);
+	NODISCARD std::vector<uint8_t> compress(Const_Span<uint8_t> src) override;
 
 	NODISCARD size_t compress(Span<uint8_t> dest, Const_Span<uint8_t> src) override
 	{
@@ -288,44 +280,113 @@ struct LZMA_Decompress_Helper : public Decompress_Helper
 
 	NODISCARD Const_Span<uint8_t> decompress(Const_Span<uint8_t> src, size_t expected_size) const override
 	{
-		if (src.size() < LZMA_PROPS_SIZE)
-			throw std::runtime_error("Input too small");
-
-		size_t out_sz = expected_size;
-		size_t in_sz = src.size() - LZMA_PROPS_SIZE;
-		const uint8_t* props = src.data() + in_sz;
-
-		const int ret = LzmaUncompress(
-			m_output_buffer.get(),
-			&out_sz,
-			src.data(),
-			&in_sz,
-			props,
-			LZMA_PROPS_SIZE
-		);
-
-		if (ret != SZ_OK || out_sz != expected_size)
-			throw std::runtime_error("LZMA error when trying to decompress a block.");
-
-		return Const_Span(m_output_buffer.get(), out_sz);
+		if (!lzma_decode(m_output_buffer.get(), expected_size, src.data(), src.size()))
+			print_and_abort("LZMA error when trying to decompress a block.\n");
+		return Const_Span(m_output_buffer.get(), expected_size);
 	}
 
 private:
 	std::unique_ptr<uint8_t[]> m_output_buffer;
-	size_t m_max_output_size;
 };
 
-// Compresses the src memory block, divided into blocks of size
-// block_size (last block may be smaller).
-// Returns a vector of compressed blocks.
-// Uses all threads of the passed thread_pool for compression.
-// The passed compressor is cloned for each thread.
-// Shows a progress bar on stdout.
-// The task_name specifies the prefix to show on the progress bar.
-NODISCARD std::vector<std::vector<uint8_t>> compress_blocks(
+// Receives compressed blocks, keyed by block id. Implementations must be
+// thread safe: distinct ids are stored concurrently.
+struct Block_Sink
+{
+	virtual ~Block_Sink() = default;
+
+	virtual void store(size_t block_id, Const_Span<uint8_t> data) = 0;
+};
+
+// Holds the compressed blocks of one table between compression and writing the
+// output file.
+//
+// The format puts every block's size and offset ahead of the block data, so all
+// sizes must be known before any data byte can be written. Small tables keep
+// the blocks in memory; larger ones spill them to a scratch file at reserved
+// offsets and read them back through a mapping of it.
+struct Compressed_Block_Store : public Block_Sink
+{
+	Compressed_Block_Store() = default;
+
+	Compressed_Block_Store(const Compressed_Block_Store&) = delete;
+	Compressed_Block_Store& operator=(const Compressed_Block_Store&) = delete;
+
+	Compressed_Block_Store(Compressed_Block_Store&& other) noexcept
+	{
+		swap(other);
+	}
+
+	Compressed_Block_Store& operator=(Compressed_Block_Store&& other) noexcept
+	{
+		swap(other);
+		return *this;
+	}
+
+	~Compressed_Block_Store() override = default;
+
+	// `uncompressed_bytes` bounds how much the in-memory variant could ever
+	// hold; above `in_memory_limit` the blocks go to `spill_path` instead, which
+	// is created here and removed with the store.
+	void open(
+		size_t num_blocks,
+		size_t uncompressed_bytes,
+		size_t in_memory_limit,
+		std::filesystem::path spill_path
+	);
+
+	// Thread safe; distinct block ids may be stored concurrently.
+	void store(size_t block_id, Const_Span<uint8_t> data) override;
+
+	// Makes the block empty. Not thread safe against a concurrent store.
+	void clear(size_t block_id);
+
+	NODISCARD bool is_spilled() const { return !m_path.empty(); }
+	NODISCARD size_t num_blocks() const { return is_spilled() ? m_sizes.size() : m_blocks.size(); }
+	NODISCARD size_t block_size(size_t block_id) const { return is_spilled() ? m_sizes[block_id] : m_blocks[block_id].size(); }
+	NODISCARD size_t total_bytes() const;
+
+	// The stored bytes, valid until the store is closed or destroyed. Thread
+	// safe, and blocks may be read in any order. The first read finalizes a
+	// spilled store, after which storing more blocks is an error.
+	NODISCARD Const_Span<uint8_t> block(size_t block_id) const;
+
+	// Releases the blocks and removes the scratch file, if any.
+	void close();
+
+private:
+	std::vector<std::vector<uint8_t>> m_blocks;
+
+	// Spill backing; active iff m_path is set.
+	std::vector<uint64_t> m_offsets;
+	std::vector<uint64_t> m_sizes;
+	std::atomic<uint64_t> m_total_size{ 0 };  // also the append position of the next block
+	Temporary_File_Tracker m_tmp_files;
+	std::filesystem::path m_path;
+	mutable Positional_Output_File m_out;
+	static constexpr size_t WRITES_CLOSED = size_t{ 1 } << (sizeof(size_t) * CHAR_BIT - 1);
+	mutable std::atomic<size_t> m_writer_state{ 0 };  // high bit = closed; remainder = writes in flight
+	mutable std::atomic<bool> m_finalized{ false };
+	mutable Memory_Mapped_File m_map{ Memory_Mapped_File::Access_Advice::SEQUENTIAL };
+	mutable std::mutex m_mutex;
+
+	void swap(Compressed_Block_Store& other) noexcept;
+};
+
+// Compresses `src`, divided into blocks of `block_size` (the last block may be
+// smaller), into `sink` at ids starting from `first_block_id`. A caller with a
+// table it cannot materialize passes one piece at a time, advancing
+// `first_block_id`.
+//
+// Each worker clones the compressor and so holds its own encoder state and
+// output block, so `max_workers` (0 for all) is what bounds compression memory.
+void compress_blocks_into(
 	In_Out_Param<Thread_Pool> thread_pool,
 	Const_Span<uint8_t> src,
 	size_t block_size,
-	std::unique_ptr<Compress_Helper> compressor,
-	std::string task_name
+	const Compress_Helper& compressor_factory,
+	size_t first_block_id,
+	size_t max_workers,
+	In_Out_Param<Block_Sink> sink,
+	In_Out_Param<Concurrent_Progress_Bar> progress_bar
 );

@@ -9,6 +9,8 @@ void atomic_fetch_or(uint16_t* p, uint16_t v);
 void atomic_fetch_or(uint32_t* p, uint32_t v);
 void atomic_fetch_or(uint64_t* p, uint64_t v);
 
+void atomic_fetch_and(uint64_t* p, uint64_t v);
+
 NODISCARD INLINE size_t lsb(uint64_t b)
 {
 #ifndef _MSC_VER

@@ -6,7 +6,7 @@
 #include "util/enum.h"
 #include "util/span.h"
 
-constexpr size_t MAX_MAN = 32;
+inline constexpr size_t MAX_MAN = 32;
 
 enum Color : int8_t {
 	WHITE, BLACK, COLOR_NB = 2
@@ -32,13 +32,13 @@ constexpr inline Piece piece_occupy(Color color)
 	return static_cast<Piece>(color << 3);
 }
 
-constexpr Piece ALL_PIECES[] = {
+inline constexpr Piece ALL_PIECES[] = {
 	WHITE_KING, WHITE_ROOK, WHITE_KNIGHT, WHITE_CANNON, WHITE_ADVISOR, WHITE_BISHOP, WHITE_PAWN,
 	BLACK_KING, BLACK_ROOK, BLACK_KNIGHT, BLACK_CANNON, BLACK_ADVISOR, BLACK_BISHOP, BLACK_PAWN
 };
 
 // Pieces (other than king) that can attack opponent's king.
-constexpr Piece ALL_FREE_ATTACKING_PIECES[] = {
+inline constexpr Piece ALL_FREE_ATTACKING_PIECES[] = {
 	WHITE_ROOK, WHITE_KNIGHT, WHITE_CANNON, WHITE_PAWN,
 	BLACK_ROOK, BLACK_KNIGHT, BLACK_CANNON, BLACK_PAWN
 };
@@ -60,7 +60,7 @@ enum Square : int8_t {
 	KING_SQUARE_NB = 9, ADVISOR_SQUARE_NB = 5, PAWN_SQUARE_NB = 55
 };
 
-constexpr Square FIRST_BLACK_SQUARE = SQ_A5;
+inline constexpr Square FIRST_BLACK_SQUARE = SQ_A5;
 
 ENUM_ENABLE_OPERATOR_INC(Square);
 ENUM_ENABLE_OPERATOR_DEC(Square);
@@ -94,7 +94,7 @@ ENUM_ENABLE_OPERATOR_ADD_EQ(Rank);
 ENUM_ENABLE_OPERATOR_SUB_EQ(Rank);
 ENUM_ENABLE_OPERATOR_DIFF(Rank);
 
-constexpr Rank SQ_RANK[SQUARE_NB] =
+inline constexpr Rank SQ_RANK[SQUARE_NB] =
 {
 	RANK_0, RANK_0, RANK_0, RANK_0, RANK_0, RANK_0, RANK_0, RANK_0, RANK_0,
 	RANK_1, RANK_1, RANK_1, RANK_1, RANK_1, RANK_1, RANK_1, RANK_1, RANK_1,
@@ -108,7 +108,7 @@ constexpr Rank SQ_RANK[SQUARE_NB] =
 	RANK_9, RANK_9, RANK_9, RANK_9, RANK_9, RANK_9, RANK_9, RANK_9, RANK_9,
 };
 
-constexpr File SQ_FILE[SQUARE_NB] =
+inline constexpr File SQ_FILE[SQUARE_NB] =
 {
 	FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H, FILE_I,
 	FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H, FILE_I,
@@ -122,7 +122,7 @@ constexpr File SQ_FILE[SQUARE_NB] =
 	FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H, FILE_I,
 };
 
-constexpr Color SQ_COLOR[SQUARE_NB] =
+inline constexpr Color SQ_COLOR[SQUARE_NB] =
 {
 	WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
 	WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE,
@@ -136,7 +136,7 @@ constexpr Color SQ_COLOR[SQUARE_NB] =
 	BLACK, BLACK, BLACK, BLACK, BLACK, BLACK, BLACK, BLACK, BLACK,
 };
 
-constexpr Square SQ_FILE_MIRROR[SQUARE_NB] = {
+inline constexpr Square SQ_FILE_MIRROR[SQUARE_NB] = {
 	SQ_I0, SQ_H0, SQ_G0, SQ_F0, SQ_E0, SQ_D0, SQ_C0, SQ_B0, SQ_A0,
 	SQ_I1, SQ_H1, SQ_G1, SQ_F1, SQ_E1, SQ_D1, SQ_C1, SQ_B1, SQ_A1,
 	SQ_I2, SQ_H2, SQ_G2, SQ_F2, SQ_E2, SQ_D2, SQ_C2, SQ_B2, SQ_A2,
@@ -149,7 +149,7 @@ constexpr Square SQ_FILE_MIRROR[SQUARE_NB] = {
 	SQ_I9, SQ_H9, SQ_G9, SQ_F9, SQ_E9, SQ_D9, SQ_C9, SQ_B9, SQ_A9,
 };
 
-constexpr Square SQ_RANK_MIRROR[SQUARE_NB] = {
+inline constexpr Square SQ_RANK_MIRROR[SQUARE_NB] = {
 	SQ_A9, SQ_B9, SQ_C9, SQ_D9, SQ_E9, SQ_F9, SQ_G9, SQ_H9, SQ_I9,
 	SQ_A8, SQ_B8, SQ_C8, SQ_D8, SQ_E8, SQ_F8, SQ_G8, SQ_H8, SQ_I8,
 	SQ_A7, SQ_B7, SQ_C7, SQ_D7, SQ_E7, SQ_F7, SQ_G7, SQ_H7, SQ_I7,
@@ -162,11 +162,11 @@ constexpr Square SQ_RANK_MIRROR[SQUARE_NB] = {
 	SQ_A0, SQ_B0, SQ_C0, SQ_D0, SQ_E0, SQ_F0, SQ_G0, SQ_H0, SQ_I0,
 };
 
-constexpr int8_t PAWN_MOVE_INC[COLOR_NB] = { 9, -9 };
+inline constexpr int8_t PAWN_MOVE_INC[COLOR_NB] = { 9, -9 };
 
-constexpr char START_FEN[] = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w";
+inline constexpr char START_FEN[] = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w";
 
-constexpr size_t MAX_FEN_LENGTH = 120;
+inline constexpr size_t MAX_FEN_LENGTH = 120;
 
 // A unique 32-bit key of the pieces present on the board.
 // It assumes that the set of pieces is the subset
@@ -463,8 +463,8 @@ NODISCARD INLINE constexpr bool is_piece_free_attacker(Piece piece)
 		|| type == PAWN;
 }
 
-constexpr char PIECE_STRING[20] = "?KRNCABP?krncabp";
-constexpr std::array<Piece, 128> PIECE_FROM_CHAR = [](){
+inline constexpr char PIECE_STRING[20] = "?KRNCABP?krncabp";
+inline constexpr std::array<Piece, 128> PIECE_FROM_CHAR = [](){
 	std::array<Piece, 128> arr{};
 	arr['K'] = WHITE_KING;
 	arr['R'] = WHITE_ROOK;

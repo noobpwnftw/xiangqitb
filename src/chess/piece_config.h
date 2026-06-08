@@ -44,7 +44,7 @@ constexpr Piece_Class& operator++(Piece_Class& p_class)
 
 NODISCARD constexpr Piece_Class make_piece_class(Color color, Piece_Type_Class pt_class)
 {
-	ASSERT(pt_class < BLACK_DEFENDERS);
+	ASSERT(static_cast<int>(pt_class) < BLACK_DEFENDERS);
 	return static_cast<Piece_Class>(pt_class + BLACK_DEFENDERS * color);
 }
 
@@ -64,7 +64,7 @@ NODISCARD constexpr Color piece_class_color(Piece_Class set)
 }
 
 // The map of a piece to its corresponding class.
-constexpr std::array<Piece_Class, PIECE_NB> PIECE_TO_PIECE_CLASS = []() {
+inline constexpr std::array<Piece_Class, PIECE_NB> PIECE_TO_PIECE_CLASS = []() {
 	std::array<Piece_Class, PIECE_NB> arr{};
 	arr[WHITE_OCCUPY] = PIECE_CLASS_NONE;
 	arr[WHITE_KING] = WHITE_DEFENDERS;
