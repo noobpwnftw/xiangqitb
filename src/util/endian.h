@@ -4,7 +4,7 @@
 
 #include <cstring>
 
-NODISCARD inline bool is_little_endian()
+NODISCARD INLINE bool is_little_endian()
 {
 	std::uint64_t value = 0x0807060504030201ull;
 	char little_endian_bytes[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };

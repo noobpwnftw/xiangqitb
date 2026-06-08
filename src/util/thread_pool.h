@@ -19,7 +19,7 @@ struct Thread_Pool
 	explicit Thread_Pool(size_t num_threads)
 	{
 		for (size_t i = 0; i < num_threads; ++i)
-			m_workers.emplace_back(i);
+			m_workers.emplace_back();
 	}
 
 	template <typename F>
@@ -29,14 +29,19 @@ struct Thread_Pool
 		auto promise = std::make_shared<std::promise<RetT>>();
 		std::future<RetT> future = promise->get_future();
 		m_workers[i].enqueue_task([job = std::forward<F>(job), promise = std::move(promise)]() mutable {
-			if constexpr (std::is_same_v<RetT, void>)
-			{
-				job();
-				promise->set_value();
+			try {
+				if constexpr (std::is_same_v<RetT, void>)
+				{
+					job();
+					promise->set_value();
+				}
+				else
+				{
+					promise->set_value(job());
+				}
 			}
-			else
-			{
-				promise->set_value(job());
+			catch (...) {
+				promise->set_exception(std::current_exception());
 			}
 		});
 		return future;
@@ -82,7 +87,6 @@ struct Thread_Pool
 	{
 		auto futures = run_async_task_on_multiple_threads(thread_use, std::forward<F>(job));
 
-		// Avoid vector of bool, because it's unsafe for parallel writes.
 		Vector_Not_Bool<decltype(job(std::declval<size_t>()))> ret;
 		ret.reserve(thread_use);
 		for (auto&& future : futures)
@@ -103,7 +107,7 @@ struct Thread_Pool
 		auto futures = run_async_task_on_multiple_threads(thread_use, std::forward<F>(job));
 
 		for (auto&& future : futures)
-			future.wait();
+			future.get();
 	}
 
 	NODISCARD size_t num_workers() const
@@ -111,12 +115,22 @@ struct Thread_Pool
 		return m_workers.size();
 	}
 
+	void respawn_thread(size_t i)
+	{
+		m_workers[i].restart();
+	}
+
+	void respawn_all_threads()
+	{
+		for (Worker_Thread& w : m_workers)
+			w.restart();
+	}
+
 private:
 
 	struct Worker_Thread
 	{
-		explicit Worker_Thread(size_t index) :
-			m_thread_id(index)
+		Worker_Thread()
 		{
 			m_quit.store(false);
 			m_thread = std::thread([this]() { thread_entry(); });
@@ -130,16 +144,17 @@ private:
 
 		~Worker_Thread()
 		{
-			std::unique_lock<std::mutex> lock(m_mutex);
+			stop_and_join();
+		}
 
-			m_quit = true;
-			m_task_or_quit.notify_one();
+		void restart()
+		{
+			ASSERT(std::this_thread::get_id() != m_thread.get_id());
 
-			m_no_tasks.wait(lock, [this]() { return m_tasks.empty(); });
+			stop_and_join();
 
-			lock.unlock();
-
-			m_thread.join();
+			m_quit.store(false);
+			m_thread = std::thread([this]() { thread_entry(); });
 		}
 
 		template <typename F>
@@ -173,14 +188,26 @@ private:
 		}
 
 	private:
+		void stop_and_join()
+		{
+			std::unique_lock<std::mutex> lock(m_mutex);
+
+			m_quit = true;
+			m_task_or_quit.notify_one();
+
+			m_no_tasks.wait(lock, [this]() { return m_tasks.empty(); });
+
+			lock.unlock();
+
+			m_thread.join();
+		}
+
 		std::thread m_thread;
-		size_t m_thread_id;
 
 		mutable std::condition_variable m_task_or_quit;
 		mutable std::condition_variable m_no_tasks;
 		mutable std::mutex m_mutex;
 
-		// These are rarely accessed so don't bother with putting them on a separate cacheline.
 		std::deque<std::function<void()>> m_tasks;
 		std::atomic<bool> m_quit;
 	};

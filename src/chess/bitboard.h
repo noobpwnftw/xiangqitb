@@ -12,7 +12,7 @@
 // The bitboard is 128 bits but there are only 90 squares. Offsets are used
 // for each bitboard half to ensure a contiguous range of bits is used for
 // the squares while having each board half correspond to a bitboard half.
-constexpr int8_t SQ_LSB_INC[COLOR_NB] = { FIRST_BLACK_SQUARE - 64, FIRST_BLACK_SQUARE };
+inline constexpr int8_t SQ_LSB_INC[COLOR_NB] = { FIRST_BLACK_SQUARE - 64, FIRST_BLACK_SQUARE };
 
 enum Bitboard_Half : uint64_t { 
 	EMPTY_BITBOARD_HALF = 0,
@@ -323,7 +323,7 @@ private:
 	Bitboard_Half m_halves[2];
 }; 
 
-constexpr std::array<Bitboard, SQUARE_NB> SQ_BB_MASK = []() {
+inline constexpr std::array<Bitboard, SQUARE_NB> SQ_BB_MASK = []() {
 	auto res = make_filled_array<SQUARE_NB, Bitboard>(Bitboard::make_empty());
 	for (Square sq = SQ_A0; sq < SQUARE_NB; ++sq)
 	{
@@ -370,7 +370,7 @@ constexpr Bitboard& Bitboard::operator^= (Square sq)
 	return *this = *this ^ sq;
 }
 
-constexpr std::array<Bitboard, RANK_NB> RANK_BB_MASK = []() {
+inline constexpr std::array<Bitboard, RANK_NB> RANK_BB_MASK = []() {
 	auto res = make_filled_array<RANK_NB, Bitboard>(Bitboard::make_empty());
 	for (Square sq = SQ_A0; sq < SQUARE_NB; ++sq)
 		res[sq_rank(sq)] |= sq;
@@ -402,7 +402,7 @@ NODISCARD INLINE constexpr Bitboard operator^(const Bitboard& a, Rank r)
 	return a ^ rank_bb(r);
 }
 
-constexpr std::array<Bitboard, FILE_NB> FILE_BB_MASK = []() {
+inline constexpr std::array<Bitboard, FILE_NB> FILE_BB_MASK = []() {
 	auto res = make_filled_array<FILE_NB, Bitboard>(Bitboard::make_empty());
 	for (Square sq = SQ_A0; sq < SQUARE_NB; ++sq)
 		res[sq_file(sq)] |= sq;
@@ -524,7 +524,7 @@ INLINE constexpr Bitboard operator~(File sq)
 	return ~file_bb(sq);
 }
 
-constexpr Bitboard KING_AREA_BB =
+inline constexpr Bitboard KING_AREA_BB =
 	(RANK_0 | RANK_1 | RANK_2 | RANK_7 | RANK_8 | RANK_9) & (FILE_D | FILE_E | FILE_F);
 
 NODISCARD INLINE constexpr const Bitboard& king_area_bb()
@@ -532,7 +532,7 @@ NODISCARD INLINE constexpr const Bitboard& king_area_bb()
 	return KING_AREA_BB;
 }
 
-constexpr Bitboard ADVISOR_AREA_BB =
+inline constexpr Bitboard ADVISOR_AREA_BB =
 	(  ((RANK_0 | RANK_2 | RANK_7 | RANK_9) & (FILE_D | FILE_F))
 	 | ((RANK_1 | RANK_8) & FILE_E));
 
@@ -541,7 +541,7 @@ NODISCARD INLINE constexpr const Bitboard& advisor_area_bb()
 	return ADVISOR_AREA_BB;
 }
 
-constexpr Bitboard BISHOP_AREA_BB =
+inline constexpr Bitboard BISHOP_AREA_BB =
 	(  ((RANK_0 | RANK_4 | RANK_5 | RANK_9) & (FILE_C | FILE_G))
 	 | ((RANK_2 | RANK_7) & (FILE_A | FILE_E | FILE_I)));
 
@@ -550,7 +550,7 @@ NODISCARD INLINE constexpr const Bitboard& bishop_area_bb()
 	return BISHOP_AREA_BB;
 }
 
-constexpr Bitboard PAWN_AREA_BB[COLOR_NB] = {
+inline constexpr Bitboard PAWN_AREA_BB[COLOR_NB] = {
 	  (RANK_5 | RANK_6 | RANK_7 | RANK_8 | RANK_9)
 	| ((RANK_3 | RANK_4) & (FILE_A | FILE_C | FILE_E | FILE_G | FILE_I)),
 	  (RANK_0 | RANK_1 | RANK_2 | RANK_3 | RANK_4)
