@@ -1,5 +1,7 @@
 #include "egtb_gen.h"
 
+#include <limits>
+
 Position_For_Gen::Position_For_Gen(const Piece_Config_For_Gen& info, Board_Index pos, Color turn) :
 	m_epsi(&info),
 	m_turn(turn),
@@ -27,7 +29,9 @@ Position_For_Gen::Position_For_Gen(const Position_For_Gen& parent, Move move, Bo
 }
 
 EGTB_Generator::EGTB_Generator(const Piece_Config& ps) :
-	m_epsi(ps)
+	m_epsi(ps),
+	m_slice_layout(m_epsi),
+	m_slice_color(piece_class_color(m_epsi.compress_id()))
 {
 	const auto [mat_key, mir_key] = m_epsi.material_keys();
 
@@ -179,8 +183,127 @@ Board_Index EGTB_Generator::next_quiet_index(
 	return quiet_index<Quiet_Index_Type::NORMAL>(m_epsi, pos_for_gen, move, mirr);
 }
 
+// Chunk of consecutive indices handed to a worker at a time, and the target
+// batch size for the paged plan, whose runs are usually much shorter.
+static constexpr size_t GEN_CHUNK_SIZE = CACHE_LINE_SIZE * CHAR_BIT * 64;
+static_assert(GEN_CHUNK_SIZE % EGTB_Bits::ELEMENT_BITS == 0,
+	"The flat sweep relies on its chunks never sharing a bitset element.");
+static_assert(GEN_CHUNK_SIZE % WDL_ENTRY_PACK_RATIO == 0,
+	"The flat sweep relies on its chunks never sharing a packed WDL byte.");
+
 Shared_Board_Index_Iterator EGTB_Generator::make_gen_iterator() const
 {
-	static constexpr size_t CHUNK_SIZE = CACHE_LINE_SIZE * CHAR_BIT * 64;
-	return Shared_Board_Index_Iterator(BOARD_INDEX_ZERO, static_cast<Board_Index>(m_epsi.num_positions()), CHUNK_SIZE);
+	return Shared_Board_Index_Iterator(BOARD_INDEX_ZERO, static_cast<Board_Index>(m_epsi.num_positions()), GEN_CHUNK_SIZE);
 }
+
+Shared_Board_Index_Iterator EGTB_Generator::make_page_iterator(size_t page) const
+{
+	ASSERT(m_paged);
+	return Shared_Board_Index_Iterator(
+		m_slice_layout,
+		m_page_layout.first_slice_of_page(page),
+		m_page_layout.end_slice_of_page(page),
+		GEN_CHUNK_SIZE);
+}
+
+void EGTB_Generator::enable_paging(
+	const Page_Layout& pages,
+	std::vector<Pageable_Table*> tables,
+	size_t capacity_pages
+)
+{
+	ASSERT(pages.num_slices() == m_slice_layout.num_slices());
+
+	const bool check_chase = m_epsi.both_sides_have_free_attackers();
+
+	size_t reach_plies = 1;
+	for (const Phase_Pages& pass : generation_pass_shapes(check_chase))
+		update_max(reach_plies, required_reach_plies(pass, m_slice_color));
+
+	m_page_layout = pages;
+	m_slice_reach = Slice_Reach(m_epsi.group(m_epsi.compress_id()), reach_plies);
+	m_paged = true;
+
+	for (size_t table = 0; table < COLOR_NB; ++table)
+	{
+		m_page_needed[table].assign(m_page_layout.num_pages(), 0);
+		m_page_touched[table].clear();
+	}
+
+	// A dispatch's pin set plus the look-ahead's transient lease must fit, or
+	// the sweep could not bring residency back under the cap. Same figure the
+	// memory plan charged for, recomputed here so the two cannot drift.
+	const size_t floor = generation_floor_page_count(
+		m_page_layout, m_slice_reach, m_slice_color, check_chase);
+
+	m_page_cache = std::make_unique<Page_Cache>(std::move(tables), std::max(capacity_pages, floor));
+}
+
+void EGTB_Generator::disable_paging()
+{
+	m_paged = false;
+	m_page_cache.reset();
+	for (size_t table = 0; table < COLOR_NB; ++table)
+	{
+		m_page_needed[table].clear();
+		m_page_touched[table].clear();
+	}
+}
+
+void EGTB_Generator::mark_needed_pages(
+	size_t table_idx,
+	size_t slice_begin,
+	size_t slice_end,
+	int slice_plies
+)
+{
+	if (slice_plies < 0)
+		return;
+
+	std::vector<uint8_t>& needed = m_page_needed[table_idx];
+	std::vector<size_t>& touched = m_page_touched[table_idx];
+
+	const auto mark = [&](size_t target_slice) {
+		const size_t page = m_page_layout.page_of_slice(target_slice);
+		if (needed[page])
+			return;
+		needed[page] = 1;
+		touched.emplace_back(page);
+	};
+
+	for (size_t slice = slice_begin; slice < slice_end; ++slice)
+	{
+		if (slice_plies == 0)
+		{
+			mark(slice);
+			continue;
+		}
+
+		for (const int32_t target : m_slice_reach.closed(static_cast<size_t>(slice_plies), slice))
+			mark(static_cast<size_t>(target));
+	}
+}
+
+Pinned_Pages EGTB_Generator::lease_one_ply_reach(Color table, Board_Index pos) const
+{
+	if (!m_paged)
+		return Pinned_Pages();
+
+	Pinned_Pages pins(*m_page_cache);
+
+	// The reach is sorted and page ids monotonic in the slice, so duplicates are
+	// adjacent. Pins are refcounted, so overlapping the dispatch's own set is
+	// harmless.
+	size_t last = std::numeric_limits<size_t>::max();
+	for (const int32_t target : m_slice_reach.closed(1, m_slice_layout.slice_of(pos)))
+	{
+		const size_t page = m_page_layout.page_of_slice(static_cast<size_t>(target));
+		if (page == last)
+			continue;
+		last = page;
+		pins.pin(static_cast<size_t>(table), page);
+	}
+
+	return pins;
+}
+

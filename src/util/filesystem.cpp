@@ -4,6 +4,9 @@
 
 #include "util/utility.h"
 
+#include <algorithm>
+#include <cerrno>
+
 #if defined(OS_WINDOWS)
 
 #include <Windows.h>
@@ -22,6 +25,127 @@
 #error "Unsupported OS"
 
 #endif
+
+bool Positional_Output_File::create(const char* file_name)
+{
+#if defined(OS_WINDOWS)
+
+	m_handle = CreateFileA(
+		file_name,
+		GENERIC_WRITE,
+		FILE_SHARE_READ,
+		NULL,
+		CREATE_ALWAYS,
+		FILE_ATTRIBUTE_NORMAL,
+		NULL
+	);
+
+	return m_handle != sys_common::INVALID_HANDLE_VALUE;
+
+#elif defined(OS_LINUX)
+
+	m_handle = open(file_name, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, (mode_t)0644);
+
+	return m_handle != sys_common::INVALID_HANDLE_VALUE;
+
+#else
+
+#error "Unsupported OS"
+
+#endif
+}
+
+bool Positional_Output_File::write_at(uint64_t offset, Const_Span<uint8_t> data) const
+{
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
+		return false;
+
+	const uint8_t* p = data.data();
+	size_t left = data.size();
+
+#if defined(OS_WINDOWS)
+
+	while (left != 0)
+	{
+		OVERLAPPED ov{};
+		ov.Offset = static_cast<DWORD>(offset & 0xFFFFFFFFull);
+		ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+
+		const DWORD chunk = static_cast<DWORD>(std::min<size_t>(left, 1u << 30));
+		DWORD written = 0;
+		if (!WriteFile(m_handle, p, chunk, &written, &ov) || written == 0)
+			return false;
+
+		p += written;
+		left -= written;
+		offset += written;
+	}
+
+	return true;
+
+#elif defined(OS_LINUX)
+
+	while (left != 0)
+	{
+		const ssize_t written = pwrite(m_handle, p, left, static_cast<off_t>(offset));
+		if (written < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			return false;
+		}
+		if (written == 0)
+			return false;
+
+		p += written;
+		left -= static_cast<size_t>(written);
+		offset += static_cast<uint64_t>(written);
+	}
+
+	return true;
+
+#else
+
+#error "Unsupported OS"
+
+#endif
+}
+
+bool Positional_Output_File::flush() const
+{
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
+		return false;
+
+#if defined(OS_WINDOWS)
+
+	return FlushFileBuffers(m_handle) != 0;
+
+#elif defined(OS_LINUX)
+
+	return fdatasync(m_handle) == 0;
+
+#else
+
+#error "Unsupported OS"
+
+#endif
+}
+
+void Positional_Output_File::close_file()
+{
+	if (m_handle == sys_common::INVALID_HANDLE_VALUE)
+		return;
+
+#if defined(OS_WINDOWS)
+	CloseHandle(m_handle);
+#elif defined(OS_LINUX)
+	close(m_handle);
+#else
+#error "Unsupported OS"
+#endif
+
+	m_handle = sys_common::INVALID_HANDLE_VALUE;
+}
 
 bool Memory_Mapped_File::open_readonly(const char* file_name)
 {

@@ -30,6 +30,16 @@ struct Serial_Memory_Writer
 		m_caret += data.size();
 	}
 
+	// Claims the next `bytes` for the caller to fill itself, so that a large
+	// payload can be written by several threads at once.
+	NODISCARD Span<uint8_t> reserve(size_t bytes)
+	{
+		ASSERT(m_caret + bytes <= m_end);
+		uint8_t* const begin = m_caret;
+		m_caret += bytes;
+		return Span<uint8_t>(begin, bytes);
+	}
+
 	void write_end_checksum(uint64_t init)
 	{
 		ASSERT(std::distance(m_begin, m_end) >= 8);

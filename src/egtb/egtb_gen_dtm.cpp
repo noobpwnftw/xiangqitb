@@ -18,13 +18,116 @@ constexpr size_t MAX_NEXT_TB_ENTRIES = 64;
 DTM_Generator::DTM_Generator(
 	const Piece_Config& ps, 
 	bool srb, 
-	const EGTB_Paths& egtb_files
+	const EGTB_Paths& egtb_files,
+	const Generation_Memory& memory
 ) :
 	EGTB_Generator(ps),
 	m_egtb_files(egtb_files),
+	m_memory(memory),
 	m_save_rule_bits(srb)
 {
 	memset(m_sub_dtm_by_capture, 0, sizeof(m_sub_dtm_by_capture));
+}
+
+uint64_t DTM_Generator::page_magic(Color c) const
+{
+	// Material and color go into the magic as well as the file name, so a
+	// stale page from another table can never be read back as this one.
+	return static_cast<uint64_t>(EGTB_Magic::DTM_MAGIC)
+		^ (static_cast<uint64_t>(m_epsi.min_material_key().value()) << 16)
+		^ static_cast<uint64_t>(c);
+}
+
+void DTM_Generator::setup_storage()
+{
+	const size_t n = m_epsi.num_positions();
+
+	if (m_memory.mode != Generation_Mode::PAGED)
+	{
+		for (const Color me : { WHITE, BLACK })
+			m_dtm_file[me].create(n);
+		return;
+	}
+
+	const Page_Layout pages(m_memory.num_slices, m_memory.slices_per_page);
+
+	for (const Color me : { WHITE, BLACK })
+		m_dtm_file[me].create_paged(
+			m_slice_layout, pages, m_egtb_files.dtm_page_tmp_prefix(m_epsi, me), page_magic(me));
+
+	enable_paging(
+		pages,
+		{ &m_dtm_file[WHITE], &m_dtm_file[BLACK] },
+		m_memory.capacity_pages);
+
+	set_sweep_band_budget_bytes(m_memory.sweep_band_bytes);
+
+	printf("Paging DTM: %zu tables x (%zu slices, %zu pages of %zuMiB), %zu resident total (floor %zu)\n",
+		static_cast<size_t>(COLOR_NB), pages.num_slices(), pages.num_pages(),
+		m_memory.page_bytes / (1024 * 1024),
+		page_cache().capacity(), m_memory.floor_pages);
+}
+
+void DTM_Generator::teardown_storage()
+{
+	if (is_paged())
+	{
+		disable_paging();
+	}
+
+	for (const Color me : { WHITE, BLACK })
+	{
+		m_dtm_file[me].remove_scratch_files();
+		m_dtm_file[me].close();
+	}
+}
+
+Compressed_EGTB DTM_Generator::compress_dtm_table(
+	In_Out_Param<Thread_Pool> thread_pool,
+	Color me,
+	const EGTB_Info& info
+)
+{
+	if (!is_paged())
+		return save_compress_egtb(
+			thread_pool, m_dtm_file[me].data_span(), me, info, m_save_rule_bits,
+			m_memory.compression_workers, m_memory.block_store_limit_bytes,
+			m_egtb_files.dtm_blocks_tmp_path(m_epsi, me));
+
+	const std::string task_name = std::string("save_compress_egtb ") + std::to_string(static_cast<int>(me));
+
+	if (egtb_is_singular_draw(me, info))
+	{
+		printf("%s: singular\n", task_name.c_str());
+		return Compressed_EGTB::make_singular(WDL_Entry::DRAW);
+	}
+
+	const LZMA_Compress_Helper factory;
+
+	Paged_Logical_Reader reader(
+		m_slice_layout,
+		page_layout(),
+		m_egtb_files.dtm_page_tmp_prefix(m_epsi, me),
+		page_magic(me),
+		DTM_File_For_Gen::ENTRY_SIZE,
+		sweep_band_budget_bytes(),
+		1);
+
+	// DTM needs no derivation: the table is already what the file holds, so the
+	// reader's own band buffer goes straight to the compressor.
+	return save_compress_streamed(
+		thread_pool,
+		factory,
+		EGTB_BLOCK_SIZE,
+		m_epsi.num_positions() * DTM_File_For_Gen::ENTRY_SIZE,
+		nullptr,
+		std::nullopt,
+		m_save_rule_bits,
+		m_memory.compression_workers,
+		m_memory.block_store_limit_bytes,
+		m_egtb_files.dtm_blocks_tmp_path(m_epsi, me),
+		task_name,
+		[&]() { return reader.next_band(thread_pool); });
 }
 
 void DTM_Generator::open_sub_egtb()
@@ -57,24 +160,24 @@ void DTM_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool, const EGTB_
 	const std::string info_path = m_egtb_files.dtm_info_save_path(m_epsi).string();
 	const std::string egtb_path = m_egtb_files.dtm_save_path(m_epsi).string();
 
+	// Nothing reads a distance entry through the pager again; the tables are
+	// swept from the spill files directly. Flushing here hands the pages' share
+	// of the budget to the compression buffers and the sweep band.
+	if (is_paged())
+		page_cache().flush_all(thread_pool);
+
 	// 压缩写入egtb
 	Compressed_EGTB save_info[COLOR_NB];
 	for (const Color me : { WHITE, BLACK })
 	{
-		save_info[me] = save_compress_egtb(
-			thread_pool, 
-			m_dtm_file[me].data_span(),
-			me, 
-			info, 
-			m_save_rule_bits
-		);
+		save_info[me] = compress_dtm_table(thread_pool, me, info);
 
 		if (m_is_symmetric)
 			break;
 	}
 	{
 		const auto colors = table_colors();
-		save_egtb_table(m_epsi, save_info, egtb_path, colors, EGTB_Magic::DTM_MAGIC);
+		save_egtb_table(thread_pool, m_epsi, save_info, egtb_path, colors, EGTB_Magic::DTM_MAGIC);
 
 		const size_t file_size = std::filesystem::file_size(egtb_path);
 		const size_t uncompressed_size = colors.size() * m_epsi.num_positions() * sizeof(DTM_Final_Entry);
@@ -225,11 +328,12 @@ void DTM_Generator::init_entries(In_Out_Param<Thread_Pool> thread_pool)
 	m_max_build_step[WHITE] = static_cast<DTM_Score>(1);
 	m_max_build_step[BLACK] = static_cast<DTM_Score>(1);
 
-	auto gen_iterator = make_gen_iterator();
-	Concurrent_Progress_Bar progress_bar(gen_iterator.num_indices(), PRINT_PERIOD, "init_entries");
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			sp_init_entries(inout_param(gen_iterator), inout_param(progress_bar));
+	Concurrent_Progress_Bar progress_bar(m_epsi.num_positions(), PRINT_PERIOD, "init_entries");
+	// Writes both sides' entries for the visited position, reading only the
+	// WDL projection and sub-tables.
+	run_phase(thread_pool, WHITE, phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
+			sp_init_entries(inout_param(it), inout_param(progress_bar));
 		}
 	);
 	progress_bar.set_finished();
@@ -363,10 +467,11 @@ bool DTM_Generator::gen_pre_bits_normal(
 )
 {
 	pre_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_gen_pre_bits<Gen_Pre_Bits_Type::NORMAL>(inout_param(gen_iterator), me, n, gen_bits, inout_param(*pre_bits), win_bits);
+	// Promotes capture wins on the visited position; successors are only
+	// tested against the resident frontier bitsets.
+	const auto ret = run_phase(thread_pool, me, phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_gen_pre_bits<Gen_Pre_Bits_Type::NORMAL>(inout_param(it), me, n, gen_bits, inout_param(*pre_bits), win_bits);
 		}
 	);
 		
@@ -382,10 +487,11 @@ bool DTM_Generator::gen_pre_bits_rule(
 )
 {
 	pre_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_gen_pre_bits<Gen_Pre_Bits_Type::RULE>(inout_param(gen_iterator), me, n, gen_bits, inout_param(*pre_bits), {});
+	// The RULE variant skips the entry read and write entirely, so it
+	// dereferences no distance entry and needs no lease.
+	const auto ret = run_phase(thread_pool, me, Phase_Pages{},
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_gen_pre_bits<Gen_Pre_Bits_Type::RULE>(inout_param(it), me, n, gen_bits, inout_param(*pre_bits), {});
 		}
 	);
 
@@ -428,10 +534,10 @@ bool DTM_Generator::save_win(
 	In_Out_Param<EGTB_Bits> win_bits
 )
 {
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_save_win(inout_param(gen_iterator), me, n, gen_bits, pre_bits, win_bits);
+	// Rewrites the visited position's entry only.
+	const auto ret = run_phase(thread_pool, me, phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_save_win(inout_param(it), me, n, gen_bits, pre_bits, win_bits);
 		}
 	);
 
@@ -517,10 +623,10 @@ bool DTM_Generator::prove_lose(
 	const EGTB_Bits& win_bits
 )
 {
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_prove_lose(inout_param(gen_iterator), me, n, gen_bits, pre_bits, win_bits);
+	// Ban-lose positions consult the opponent's entry one quiet ply on.
+	const auto ret = run_phase(thread_pool, me, phase_pages(0, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_prove_lose(inout_param(it), me, n, gen_bits, pre_bits, win_bits);
 		}
 	);
 
@@ -588,12 +694,13 @@ bool DTM_Generator::remove_fake(
 {
 	ASSUME(type == WDL_Entry::WIN || type == WDL_Entry::LOSE);
 
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
+	// check_remove_lose/win read the opponent one quiet ply on and this side
+	// one further ply after that.
+	const auto ret = run_phase(thread_pool, me, phase_pages(2, 1),
+		[&](Shared_Board_Index_Iterator& it) {
 			return TEMPLATE_DISPATCH(
 				(Template_Dispatch<WDL_Entry, WDL_Entry::WIN, WDL_Entry::LOSE>(type)),
-				sp_remove_fake, inout_param(gen_iterator), me, rule_bits
+				sp_remove_fake, inout_param(it), me, rule_bits
 			);
 		}
 	);
@@ -610,10 +717,11 @@ bool DTM_Generator::change_lose_pos(
 )
 {
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_load_bits<Load_Bits_Type::CHANGE_LOSE_POS>(inout_param(gen_iterator), me, n, inout_param(*gen_bits), &pre_bits);
+	// Reads the opponent's winning entries one quiet ply on, writes this side's
+	// visited entry.
+	const auto ret = run_phase(thread_pool, me, phase_pages(0, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_load_bits<Load_Bits_Type::CHANGE_LOSE_POS>(inout_param(it), me, n, inout_param(*gen_bits), &pre_bits);
 		}
 	);
 
@@ -628,10 +736,10 @@ bool DTM_Generator::load_lose_change(
 )
 {
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_load_bits<Load_Bits_Type::LOAD_LOSE_CHANGE>(inout_param(gen_iterator), me, n, inout_param(*gen_bits), {});
+	// Same shape as change_lose_pos, driven off the unknown bitset instead.
+	const auto ret = run_phase(thread_pool, me, phase_pages(0, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_load_bits<Load_Bits_Type::LOAD_LOSE_CHANGE>(inout_param(it), me, n, inout_param(*gen_bits), {});
 		}
 	);
 
@@ -776,6 +884,10 @@ bool DTM_Generator::check_double_chase_win(
 
 	Position_For_Gen next_pos_gen(pos_gen, evt_move, next_idx, mirr);
 	auto& next_board = next_pos_gen.board();
+
+	// The one read here is the opponent's entry a quiet ply on, which is a slice
+	// ply past what the dispatch declared.
+	const Pinned_Pages lease = lease_one_ply_reach(opp, next_idx);
 
 	DTM_Score min_step = DTM_SCORE_MAX;
 
@@ -941,12 +1053,11 @@ void DTM_Generator::gen(In_Out_Param<Thread_Pool> thread_pool)
 {
 	printf("%s gen dtm start...\n", m_epsi.name().c_str());
 
-	for (const Color me : { WHITE, BLACK })
-		m_dtm_file[me].create(m_epsi.num_positions());
+	setup_storage();
 
 	open_sub_egtb();
 
-	EGTB_Bits_Pool tmp_bits(5, m_epsi.num_positions());
+	EGTB_Bits_Pool tmp_bits(5, m_epsi.num_positions(), is_paged());
 
 	m_unknown_bits[WHITE] = tmp_bits.acquire_cleared(thread_pool);
 	m_unknown_bits[BLACK] = tmp_bits.acquire_cleared(thread_pool);
@@ -975,8 +1086,7 @@ void DTM_Generator::gen(In_Out_Param<Thread_Pool> thread_pool)
 
 	save_egtb(thread_pool, info);
 
-	for (const Color me : { WHITE, BLACK })
-		m_dtm_file[me].close();
+	teardown_storage();
 }
 
 DTM_Intermediate_Entry DTM_Generator::check_remove_lose(Position_For_Gen& pos_gen, DTM_Intermediate_Entry tt) const
@@ -1131,10 +1241,10 @@ DTM_Intermediate_Entry DTM_Generator::check_remove_win(Position_For_Gen& pos_gen
 
 EGTB_Info DTM_Generator::check_dtm_egtb(In_Out_Param<Thread_Pool> thread_pool)
 {
-	auto gen_iterator = make_gen_iterator();
-	auto infos = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_check_dtm_egtb(inout_param(gen_iterator));
+	// Finalizes and validates both sides' entries for the visited position.
+	auto infos = run_phase(thread_pool, WHITE, phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_check_dtm_egtb(inout_param(it));
 		}
 	);
 
@@ -1249,10 +1359,10 @@ void DTM_Generator::sp_second_init(In_Out_Param<Shared_Board_Index_Iterator> gen
 
 void DTM_Generator::second_init(In_Out_Param<Thread_Pool> thread_pool, Color root_color)
 {
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_second_init(inout_param(gen_iterator), root_color);
+	// Reads both sides' entries for the visited position.
+	run_phase(thread_pool, WHITE, phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_second_init(inout_param(it), root_color);
 		}
 	);
 }
@@ -1337,11 +1447,12 @@ void DTM_Generator::init_check_chase(
 {
 	const size_t PRINT_PERIOD = thread_pool->num_workers() * (1 << 20);
 
-	auto gen_iterator = make_gen_iterator();
-	Concurrent_Progress_Bar progress_bar(gen_iterator.num_indices(), PRINT_PERIOD, "init_check_chase");
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_init_check_chase(inout_param(gen_iterator), rule_bits, inout_param(progress_bar));
+	Concurrent_Progress_Bar progress_bar(m_epsi.num_positions(), PRINT_PERIOD, "init_check_chase");
+	// Takes each color as the mover in turn, so the one-ply reach is needed
+	// whichever color the slice group is.
+	run_phase(thread_pool, WHITE, phase_pages_both_movers(1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_init_check_chase(inout_param(it), rule_bits, inout_param(progress_bar));
 		}
 	);
 	progress_bar.set_finished();
@@ -1382,10 +1493,10 @@ void DTM_Generator::load_direct(
 )
 {
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_load_direct(inout_param(gen_iterator), me, inout_param(*gen_bits));
+	// Reads both sides' entries for the visited position.
+	run_phase(thread_pool, me, phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_load_direct(inout_param(it), me, inout_param(*gen_bits));
 		}
 	);
 }
@@ -1454,10 +1565,10 @@ void DTM_Generator::find_rule_lose(
 {
 	me_bits->clear(thread_pool);
 	opp_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_find_rule_lose(inout_param(gen_iterator), me, inout_param(*me_bits), inout_param(*opp_bits));
+	// Reads this side's visited entry and the opponent's one quiet ply on.
+	run_phase(thread_pool, me, phase_pages(0, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_find_rule_lose(inout_param(it), me, inout_param(*me_bits), inout_param(*opp_bits));
 		}
 	);
 }
@@ -1486,10 +1597,10 @@ void DTM_Generator::sp_save_rule_lose(
 
 void DTM_Generator::save_rule_lose(In_Out_Param<Thread_Pool> thread_pool, Color me, const EGTB_Bits& me_bits)
 {
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_save_rule_lose(inout_param(gen_iterator), me, me_bits);
+	// Rewrites the visited position's entry only.
+	run_phase(thread_pool, me, phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_save_rule_lose(inout_param(it), me, me_bits);
 		}
 	);
 }
@@ -1544,10 +1655,11 @@ bool DTM_Generator::remove_rule_lose(
 	const EGTB_Bits& opp_bits
 )
 {
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_remove_rule_lose(inout_param(gen_iterator), root_color, me, me_bits, opp_bits);
+	// Only the opponent's entries one quiet ply on are read; this side's are
+	// not touched at all.
+	const auto ret = run_phase(thread_pool, me, phase_pages(PHASE_PLIES_NONE, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_remove_rule_lose(inout_param(it), root_color, me, me_bits, opp_bits);
 		}
 	);
 	return std::any_of(ret.begin(), ret.end(), [](const bool ret) { return ret; });
@@ -1821,10 +1933,11 @@ bool DTM_Generator::change_win_pos_step1(
 {
 	gen_bits->clear(thread_pool);
 	win_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_change_win_pos<Change_Win_Pos_Step::STEP_1>(inout_param(gen_iterator), me, n, inout_param(*gen_bits), inout_param(*win_bits), pre_bits);
+	// Step 1 stops before the double-chase verification, so it stays inside
+	// the opponent's closed one-ply reach.
+	const auto ret = run_phase(thread_pool, me, phase_pages(0, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_change_win_pos<Change_Win_Pos_Step::STEP_1>(inout_param(it), me, n, inout_param(*gen_bits), inout_param(*win_bits), pre_bits);
 		}
 	);
 	return std::any_of(ret.begin(), ret.end(), [](const bool ret) { return ret; });
@@ -1838,6 +1951,13 @@ bool DTM_Generator::change_win_pos_step2(
 	const EGTB_Bits& win_bits
 )
 {
-	auto gen_iterator = make_gen_iterator();
-	return sp_change_win_pos<Change_Win_Pos_Step::STEP_2>(inout_param(gen_iterator), me, n, inout_param(*gen_bits), {}, win_bits);
+	// Deliberately sequential: step 2 has circular references into this side's
+	// own entries. Its one deeper read leases its own pages (see
+	// check_double_chase_win) rather than widening this declaration.
+	const auto ret = run_phase_on_this_thread(thread_pool, me, phase_pages(2, 1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_change_win_pos<Change_Win_Pos_Step::STEP_2>(inout_param(it), me, n, inout_param(*gen_bits), {}, win_bits);
+		}
+	);
+	return std::any_of(ret.begin(), ret.end(), [](const bool ret) { return ret; });
 }

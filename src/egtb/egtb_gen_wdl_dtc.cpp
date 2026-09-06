@@ -30,14 +30,41 @@ using Remove_Fake_Template_Dispatch =
 		DTC_Generator::Remove_Fake_Step::STEP_3
 	>;
 
+// The WDL classification of one position and the entry the DTC file gets for
+// it. Illegal and drawn positions are both written out as draws, so the
+// classification has to happen before -- or instead of -- that rewrite.
+struct DTC_Finalized
+{
+	WDL_Entry wdl;
+	DTC_Final_Entry entry;
+	DTC_Score win_value;   // zero unless wdl == WIN
+};
+
+template <DTC_Entry_Order ORDER>
+NODISCARD static DTC_Finalized finalize_dtc_entry(bool known, DTC_Final_Entry raw)
+{
+	const bool legal = known ? raw.is_legal() : true;
+	const DTC_Score value = known ? raw.value<ORDER>() : DTC_SCORE_ZERO;
+
+	if (!legal)
+		return { WDL_Entry::ILLEGAL, DTC_Final_Entry::make_draw(), DTC_SCORE_ZERO };
+	if (known && (value & 1))
+		return { WDL_Entry::LOSE, raw, DTC_SCORE_ZERO };
+	if (known && value != 0)
+		return { WDL_Entry::WIN, raw, value };
+	return { WDL_Entry::DRAW, DTC_Final_Entry::make_draw(), DTC_SCORE_ZERO };
+}
+
 DTC_Generator::DTC_Generator(
 	const Piece_Config& ps,
 	bool save_wdl,
 	bool save_dtc,
-	const EGTB_Paths& egtb_files
+	const EGTB_Paths& egtb_files,
+	const Generation_Memory& memory
 ) :
 	EGTB_Generator(ps),
 	m_egtb_files(egtb_files),
+	m_memory(memory),
 	m_save_wdl(save_wdl),
 	m_save_dtc(save_dtc),
 	m_entry_order(DTC_Entry_Order::ORDER_64)
@@ -46,6 +73,59 @@ DTC_Generator::DTC_Generator(
 		return;
 
 	memset(m_sub_wdl_by_capture, 0, sizeof(m_sub_wdl_by_capture));
+}
+
+uint64_t DTC_Generator::page_magic(Color c) const
+{
+	// Material and color go into the magic as well as the file name, so a
+	// stale page from another table can never be read back as this one.
+	return static_cast<uint64_t>(EGTB_Magic::DTC_MAGIC)
+		^ (static_cast<uint64_t>(m_epsi.min_material_key().value()) << 16)
+		^ static_cast<uint64_t>(c);
+}
+
+void DTC_Generator::setup_storage()
+{
+	const size_t n = m_epsi.num_positions();
+
+	if (m_memory.mode != Generation_Mode::PAGED)
+	{
+		for (const Color turn : { WHITE, BLACK })
+			m_dtc_file[turn].create(n);
+		return;
+	}
+
+	const Page_Layout pages(m_memory.num_slices, m_memory.slices_per_page);
+
+	for (const Color turn : { WHITE, BLACK })
+		m_dtc_file[turn].create_paged(
+			m_slice_layout, pages, m_egtb_files.dtc_page_tmp_prefix(m_epsi, turn), page_magic(turn));
+
+	enable_paging(
+		pages,
+		{ &m_dtc_file[WHITE], &m_dtc_file[BLACK] },
+		m_memory.capacity_pages);
+
+	set_sweep_band_budget_bytes(m_memory.sweep_band_bytes);
+
+	printf("Paging DTC: %zu tables x (%zu slices, %zu pages of %zuMiB), %zu resident total (floor %zu)\n",
+		static_cast<size_t>(COLOR_NB), pages.num_slices(), pages.num_pages(),
+		m_memory.page_bytes / (1024 * 1024),
+		page_cache().capacity(), m_memory.floor_pages);
+}
+
+void DTC_Generator::teardown_storage()
+{
+	if (is_paged())
+	{
+		disable_paging();
+	}
+
+	for (const Color turn : { WHITE, BLACK })
+	{
+		m_dtc_file[turn].remove_scratch_files();
+		m_dtc_file[turn].close();
+	}
 }
 
 void DTC_Generator::open_sub_evtb()
@@ -74,12 +154,14 @@ EGTB_Info DTC_Generator::gen_evtb(In_Out_Param<Thread_Pool> thread_pool)
 {
 	EGTB_Info info;
 
-	auto gen_iterator = make_gen_iterator();
-	const auto infos = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
+	// Finalizes the visited position's entry for both sides to move and projects
+	// it to WDL; nothing else is dereferenced.
+	const auto infos = run_phase(thread_pool, WHITE,
+		phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
 			return TEMPLATE_DISPATCH(
 				(EGTB_Order_Template_Dispatch(m_entry_order)),
-				sp_gen_evtb, inout_param(gen_iterator)
+				sp_gen_evtb, inout_param(it)
 			);
 		}
 	);
@@ -110,59 +192,333 @@ EGTB_Info DTC_Generator::sp_gen_evtb(In_Out_Param<Shared_Board_Index_Iterator> g
 	{
 		for (const Color me : { WHITE, BLACK })
 		{
-			bool legal;
-			DTC_Score value;
-
 			const bool known = is_known(current_pos, me);
+			const DTC_Finalized f = finalize_dtc_entry<ORDER>(
+				known, known ? read_dtc<DTC_Final_Entry>(current_pos, me) : DTC_Final_Entry{});
 
-			if (known)
-			{
-				const auto entry = read_dtc<DTC_Final_Entry>(current_pos, me);
-				legal = entry.is_legal();
-				value = entry.value<ORDER>();
-			}
-			else
-			{
-				legal = true;
-				value = DTC_SCORE_ZERO;
-			}
+			if (f.wdl == WDL_Entry::ILLEGAL || f.wdl == WDL_Entry::DRAW)
+				write_dtc(current_pos, me, f.entry);
+			if (f.wdl == WDL_Entry::WIN)
+				info.maybe_update_longest_win(me, current_pos, f.win_value);
 
-			WDL_Entry data;
-			if (!legal)
-			{
-				write_dtc(current_pos, me, DTC_Final_Entry::make_draw());
-				data = WDL_Entry::ILLEGAL;
-			}
-			else if (known && (value & 1))
-			{
-				data = WDL_Entry::LOSE;
-			}
-			else if (known && value != 0)
-			{
-				data = WDL_Entry::WIN;
-				info.maybe_update_longest_win(me, current_pos, value);
-			}
-			else
-			{
-				write_dtc(current_pos, me, DTC_Final_Entry::make_draw());
-				data = WDL_Entry::DRAW;
-			}
-
-			info.add_result(me, data);
-
-			m_wdl_file[me].write(current_pos, data);
+			info.add_result(me, f.wdl);
+			m_wdl_file[me].write(current_pos, f.wdl);
 		}
 	}
 
 	return info;
 }
 
+Compressed_EGTB DTC_Generator::compress_dtc_table(
+	In_Out_Param<Thread_Pool> thread_pool,
+	Color me,
+	const EGTB_Info& info
+)
+{
+	const bool is_big = m_entry_order == DTC_Entry_Order::ORDER_128;
+	if (!is_paged())
+		return save_compress_egtb(
+			thread_pool, m_dtc_file[me].data_span(), me, info, is_big,
+			m_memory.compression_workers, m_memory.block_store_limit_bytes,
+			m_egtb_files.dtc_blocks_tmp_path(m_epsi, me));
+
+	const std::string task_name = std::string("save_compress_egtb ") + std::to_string(static_cast<int>(me));
+
+	if (egtb_is_singular_draw(me, info))
+	{
+		printf("%s: singular\n", task_name.c_str());
+		return Compressed_EGTB::make_singular(WDL_Entry::DRAW);
+	}
+
+	const LZMA_Compress_Helper factory;
+	Logical_Sweep sweep = begin_logical_sweep(me);
+
+	return save_compress_streamed(
+		thread_pool,
+		factory,
+		EGTB_BLOCK_SIZE,
+		m_epsi.num_positions() * DTC_File_For_Gen::ENTRY_SIZE,
+		nullptr,
+		std::nullopt,
+		is_big,
+		m_memory.compression_workers,
+		m_memory.block_store_limit_bytes,
+		m_egtb_files.dtc_blocks_tmp_path(m_epsi, me),
+		task_name,
+		[&]() {
+			return m_entry_order == DTC_Entry_Order::ORDER_128
+				? next_dtc_band<DTC_Entry_Order::ORDER_128>(thread_pool, inout_param(sweep))
+				: next_dtc_band<DTC_Entry_Order::ORDER_64>(thread_pool, inout_param(sweep));
+		});
+}
+
+DTC_Generator::Logical_Sweep DTC_Generator::begin_logical_sweep(Color me) const
+{
+	Logical_Sweep sweep;
+	sweep.me = me;
+	sweep.reader = std::make_unique<Paged_Logical_Reader>(
+		m_slice_layout,
+		page_layout(),
+		m_egtb_files.dtc_page_tmp_prefix(m_epsi, me),
+		page_magic(me),
+		DTC_File_For_Gen::ENTRY_SIZE,
+		sweep_band_budget_bytes(),
+		// Four WDL entries share a byte, so a band has to cover a whole
+		// number of them for the projection to emit whole bytes and for
+		// workers never to share one.
+		WDL_ENTRY_PACK_RATIO);
+	return sweep;
+}
+
+// Splits a band's `entries` into `align`-aligned chunks and runs `body` on
+// each. The derivations are per position, so the only constraint is that two
+// workers never share an output byte.
+template <typename Body>
+static void for_each_band_chunk(
+	In_Out_Param<Thread_Pool> thread_pool,
+	size_t entries,
+	size_t align,
+	Body&& body
+)
+{
+	const size_t workers = std::max<size_t>(1, thread_pool->num_workers());
+	const size_t chunk = ceil_to_multiple(ceil_div(entries, workers), align);
+
+	std::atomic<size_t> next(0);
+	thread_pool->run_sync_task_on_all_threads([&](size_t worker) {
+		for (;;)
+		{
+			const size_t first = next.fetch_add(1, std::memory_order_relaxed) * chunk;
+			if (first >= entries)
+				return;
+			body(worker, first, std::min(chunk, entries - first));
+		}
+	});
+}
+
+template <DTC_Entry_Order ORDER>
+Span<uint8_t> DTC_Generator::next_dtc_band(
+	In_Out_Param<Thread_Pool> thread_pool,
+	In_Out_Param<Logical_Sweep> sweep
+) const
+{
+	const Span<uint8_t> raw = sweep->reader->next_band(thread_pool);
+	if (raw.empty())
+		return Span<uint8_t>(sweep->out.data(), size_t(0));
+
+	const size_t entries = raw.size() / DTC_File_For_Gen::ENTRY_SIZE;
+	const Board_Index first_index = sweep->next_index;
+	sweep->next_index += entries;
+
+	sweep->out.resize(raw.size());
+
+	for_each_band_chunk(thread_pool, entries, 1, [&](size_t, size_t first, size_t count) {
+		for (size_t i = first; i < first + count; ++i)
+		{
+			const Board_Index pos = first_index + i;
+			DTC_Final_Entry raw_entry;
+			std::memcpy(&raw_entry, raw.data() + i * DTC_File_For_Gen::ENTRY_SIZE, sizeof(raw_entry));
+
+			const DTC_Finalized f =
+				finalize_dtc_entry<ORDER>(is_known(pos, sweep->me), raw_entry);
+			std::memcpy(sweep->out.data() + i * DTC_File_For_Gen::ENTRY_SIZE, &f.entry, sizeof(f.entry));
+		}
+	});
+
+	return Span<uint8_t>(sweep->out.data(), sweep->out.size());
+}
+
+template <DTC_Entry_Order ORDER>
+Span<uint8_t> DTC_Generator::next_wdl_band(
+	In_Out_Param<Thread_Pool> thread_pool,
+	In_Out_Param<Logical_Sweep> sweep,
+	Optional_In_Out_Param<EGTB_Info> info
+) const
+{
+	const Span<uint8_t> raw = sweep->reader->next_band(thread_pool);
+	if (raw.empty())
+		return Span<uint8_t>(sweep->out.data(), size_t(0));
+
+	const size_t entries = raw.size() / DTC_File_For_Gen::ENTRY_SIZE;
+	const Board_Index first_index = sweep->next_index;
+	sweep->next_index += entries;
+
+	// Only the final band can end mid-byte, and the byte it leaves partial is
+	// the format's padding, which must read DRAW -- zero, so clearing suffices.
+	sweep->out.assign(ceil_div(entries, WDL_ENTRY_PACK_RATIO), 0);
+
+	const size_t num_shards = std::max<size_t>(1, thread_pool->num_workers());
+	std::vector<EGTB_Info> shards(num_shards);
+
+	for_each_band_chunk(thread_pool, entries, WDL_ENTRY_PACK_RATIO,
+		[&](size_t worker, size_t first, size_t count) {
+			EGTB_Info& shard = shards[worker];
+			for (size_t i = first; i < first + count; ++i)
+			{
+				const Board_Index pos = first_index + i;
+				DTC_Final_Entry raw_entry;
+				std::memcpy(&raw_entry, raw.data() + i * DTC_File_For_Gen::ENTRY_SIZE, sizeof(raw_entry));
+
+				const DTC_Finalized f =
+					finalize_dtc_entry<ORDER>(is_known(pos, sweep->me), raw_entry);
+
+				// The byte starts clear and each position is written once.
+				sweep->out[i / WDL_ENTRY_PACK_RATIO] |= static_cast<uint8_t>(
+					static_cast<uint8_t>(f.wdl) << (WDL_ENTRY_BITS * (i % WDL_ENTRY_PACK_RATIO)));
+
+				if (info)
+				{
+					shard.add_result(sweep->me, f.wdl);
+					if (f.wdl == WDL_Entry::WIN)
+						shard.maybe_update_longest_win(sweep->me, pos, f.win_value);
+				}
+			}
+		});
+
+	if (info)
+		info->consolidate_from(shards.begin(), shards.end(), sweep->me);
+
+	return Span<uint8_t>(sweep->out.data(), sweep->out.size());
+}
+
+EGTB_Info DTC_Generator::gather_paged_info(In_Out_Param<Thread_Pool> thread_pool)
+{
+	// The samples the WDL dictionary is trained on are spread evenly across the
+	// projection, so they cannot be collected while compressing it: the
+	// dictionary is needed before the first block. This sweep gathers them
+	// alongside the statistics, which a paged run needs anyway because gen_evtb
+	// does not run. Without a WDL output there is no dictionary to train.
+	EGTB_Info info;
+
+	const WDL_Dict_Sampling sampling = m_save_wdl
+		? wdl_dict_sampling(ceil_div(m_epsi.num_positions(), WDL_ENTRY_PACK_RATIO))
+		: WDL_Dict_Sampling{};
+
+	for (const Color me : { WHITE, BLACK })
+	{
+		m_wdl_dict_samples[me].assign(sampling.num_blocks * WDL_BLOCK_SIZE, Packed_WDL_Entries{});
+
+		Logical_Sweep sweep = begin_logical_sweep(me);
+		size_t offset = 0;
+		for (;;)
+		{
+			const Span<uint8_t> band = m_entry_order == DTC_Entry_Order::ORDER_128
+				? next_wdl_band<DTC_Entry_Order::ORDER_128>(thread_pool, inout_param(sweep), inout_param(info))
+				: next_wdl_band<DTC_Entry_Order::ORDER_64>(thread_pool, inout_param(sweep), inout_param(info));
+			if (band.size() == 0)
+				break;
+
+			// A sample block can straddle a band boundary, so the raw bytes are
+			// gathered here and prepared once the buffer is complete.
+			for (size_t b = 0; b < sampling.num_blocks; ++b)
+			{
+				const size_t block_begin = b * sampling.stride * WDL_BLOCK_SIZE;
+				const size_t from = std::max(block_begin, offset);
+				const size_t to = std::min(block_begin + WDL_BLOCK_SIZE, offset + band.size());
+				if (from >= to)
+					continue;
+
+				std::memcpy(
+					reinterpret_cast<uint8_t*>(m_wdl_dict_samples[me].data())
+						+ b * WDL_BLOCK_SIZE + (from - block_begin),
+					band.data() + (from - offset),
+					to - from);
+			}
+
+			offset += band.size();
+		}
+
+		// The dictionary is trained on prepared bytes, so the samples get the
+		// same per-block preparation the compressor applies.
+		for (size_t b = 0; b < sampling.num_blocks; ++b)
+			prepare_packed_wdl_entries_for_compression(Span<Packed_WDL_Entries>(
+				m_wdl_dict_samples[me].data() + b * WDL_BLOCK_SIZE, WDL_BLOCK_SIZE));
+	}
+
+	for (const Color me : { WHITE, BLACK })
+	{
+		if (info.longest_win[me] > 0)
+		{
+			info.longest_win[me] -= 1;
+			Position_For_Gen pos_gen(m_epsi, static_cast<Board_Index>(info.longest_idx[me]), me);
+			pos_gen.get_fen(Span(info.longest_fen[me]));
+		}
+	}
+
+	info.loop_cnt[0] = info.loop_cnt[1] = narrowing_static_cast<uint8_t>(m_max_order);
+	return info;
+}
+
+Compressed_EGTB DTC_Generator::compress_wdl_table(
+	In_Out_Param<Thread_Pool> thread_pool,
+	Color me,
+	const EGTB_Info& info
+)
+{
+	if (!is_paged())
+	{
+		prepare_evtb_for_compression(thread_pool, m_wdl_file[me].entry_span());
+
+		return save_compress_evtb(
+			thread_pool, m_wdl_file[me].entry_span(), me, info,
+			m_memory.compression_workers, m_memory.block_store_limit_bytes,
+			m_egtb_files.wdl_blocks_tmp_path(m_epsi, me));
+	}
+
+	const std::string task_name = std::string("save_compress_evtb ") + std::to_string(static_cast<int>(me));
+
+	if (const auto single = singular_wdl_value(me, info))
+	{
+		printf("%s: singular\n", task_name.c_str());
+		return Compressed_EGTB::make_singular(*single);
+	}
+
+	const std::optional<LZ4_Dict> dict = make_dict_from_wdl_samples(
+		Const_Span<Packed_WDL_Entries>(m_wdl_dict_samples[me].data(), m_wdl_dict_samples[me].size()));
+	const LZ4_Compress_Helper factory(dict.has_value() ? &*dict : nullptr);
+
+	Logical_Sweep sweep = begin_logical_sweep(me);
+
+	return save_compress_streamed(
+		thread_pool,
+		factory,
+		WDL_BLOCK_SIZE,
+		ceil_div(m_epsi.num_positions(), WDL_ENTRY_PACK_RATIO),
+		&prepare_packed_wdl_entries_for_compression,
+		dict,
+		false,
+		m_memory.compression_workers,
+		m_memory.block_store_limit_bytes,
+		m_egtb_files.wdl_blocks_tmp_path(m_epsi, me),
+		task_name,
+		[&]() {
+			return m_entry_order == DTC_Entry_Order::ORDER_128
+				? next_wdl_band<DTC_Entry_Order::ORDER_128>(thread_pool, inout_param(sweep), {})
+				: next_wdl_band<DTC_Entry_Order::ORDER_64>(thread_pool, inout_param(sweep), {});
+		});
+}
+
 void DTC_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool)
 {
-	for (const Color me : { WHITE, BLACK })
-		m_wdl_file[me].create(m_epsi.num_positions());
+	EGTB_Info info;
 
-	EGTB_Info info = gen_evtb(thread_pool);
+	if (is_paged())
+	{
+		// Nothing reads a distance entry through the pager again: both output
+		// files are swept from the spill files directly, and the projection is
+		// derived as they are rather than materialized. Flushing here hands the
+		// pages' share of the budget to the compression buffers and the sweep
+		// band.
+		page_cache().flush_all(thread_pool);
+		info = gather_paged_info(thread_pool);
+	}
+	else
+	{
+		for (const Color me : { WHITE, BLACK })
+			m_wdl_file[me].create(m_epsi.num_positions());
+
+		info = gen_evtb(thread_pool);
+	}
 
 	if (m_save_wdl)
 	{
@@ -172,20 +528,11 @@ void DTC_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool)
 		Compressed_EGTB save_info[COLOR_NB];
 
 		for (const Color me : { WHITE, BLACK })
-		{
-			prepare_evtb_for_compression(thread_pool, m_wdl_file[me].entry_span());
-
-			save_info[me] = save_compress_evtb(
-				thread_pool,
-				m_wdl_file[me].entry_span(),
-				me, 
-				info
-			);
-		}
+			save_info[me] = compress_wdl_table(thread_pool, me, info);
 
 		{
 			const auto colors = table_colors();
-			save_evtb_table(m_epsi, save_info, wdl_path, colors, EGTB_Magic::WDL_MAGIC);
+			save_evtb_table(thread_pool, m_epsi, save_info, wdl_path, colors, EGTB_Magic::WDL_MAGIC);
 
 			const size_t file_size = std::filesystem::file_size(wdl_path);
 			const size_t uncompressed_size = colors.size() * m_epsi.num_positions() / WDL_ENTRY_PACK_RATIO;
@@ -196,16 +543,20 @@ void DTC_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool)
 		if (m_is_symmetric)
 		{ 
 			// force saving both tables
-			save_evtb_table(m_epsi, save_info, wdl_gen_path, { WHITE, BLACK }, EGTB_Magic::WDL_MAGIC);
+			save_evtb_table(thread_pool, m_epsi, save_info, wdl_gen_path, { WHITE, BLACK }, EGTB_Magic::WDL_MAGIC);
 
 			const size_t file_size = std::filesystem::file_size(wdl_gen_path);
 			const size_t uncompressed_size = 2 * m_epsi.num_positions() / WDL_ENTRY_PACK_RATIO;
 			const double compression_ratio = static_cast<double>(uncompressed_size) / file_size;
 			printf("Saved compressed WDL gen file. Compression ratio: x%.2f\n", compression_ratio);
 		}
+	}
 
-		for (const Color me : { WHITE, BLACK })
-			m_wdl_file[me].close();
+	for (const Color me : { WHITE, BLACK })
+	{
+		m_wdl_file[me].close();
+		m_wdl_dict_samples[me].clear();
+		m_wdl_dict_samples[me].shrink_to_fit();
 	}
 
 	// 压缩写入egtb
@@ -218,13 +569,7 @@ void DTC_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool)
 
 		for (const Color me : { WHITE, BLACK })
 		{
-			save_info[me] = save_compress_egtb(
-				thread_pool,
-				m_dtc_file[me].data_span(),
-				me, 
-				info, 
-				m_entry_order == DTC_Entry_Order::ORDER_128
-			);
+			save_info[me] = compress_dtc_table(thread_pool, me, info);
 
 			if (m_is_symmetric)
 				break;
@@ -232,7 +577,7 @@ void DTC_Generator::save_egtb(In_Out_Param<Thread_Pool> thread_pool)
 
 		{
 			const auto colors = table_colors();
-			save_egtb_table(m_epsi, save_info, dtc_path, colors, EGTB_Magic::DTC_MAGIC);
+			save_egtb_table(thread_pool, m_epsi, save_info, dtc_path, colors, EGTB_Magic::DTC_MAGIC);
 
 			const size_t file_size = std::filesystem::file_size(dtc_path);
 			const size_t uncompressed_size = colors.size() * m_epsi.num_positions() * sizeof(DTC_File_For_Gen::ENTRY_SIZE);
@@ -286,10 +631,11 @@ bool DTC_Generator::gen_pre_bits(
 )
 {
 	pre_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_gen_pre_bits(inout_param(gen_iterator), me, gen_bits, inout_param(*pre_bits));
+	// Frontier bitsets only: no distance entry is dereferenced, so this pass
+	// needs no lease.
+	const auto ret = run_phase(thread_pool, me, Phase_Pages{},
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_gen_pre_bits(inout_param(it), me, gen_bits, inout_param(*pre_bits));
 		}
 	);
 
@@ -329,12 +675,13 @@ bool DTC_Generator::save_win(
 )
 {
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
+	// Writes the score of the visited position only.
+	const auto ret = run_phase(thread_pool, me,
+		phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
 			return TEMPLATE_DISPATCH(
 				(EGTB_Order_Template_Dispatch(m_entry_order)),
-				sp_save_win, inout_param(gen_iterator), me, n, pre_bits, inout_param(*gen_bits), win_bits
+				sp_save_win, inout_param(it), me, n, pre_bits, inout_param(*gen_bits), win_bits
 			);
 		}
 	);
@@ -402,12 +749,14 @@ bool DTC_Generator::prove_lose(
 )
 {
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
+	// Successors are tested against the resident win bitset, so only the visited
+	// position's entry is touched.
+	const auto ret = run_phase(thread_pool, me,
+		phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
 			return TEMPLATE_DISPATCH(
 				(EGTB_Order_Template_Dispatch(m_entry_order)),
-				sp_prove_lose, inout_param(gen_iterator), me, n, pre_bits, inout_param(*gen_bits), win_bits
+				sp_prove_lose, inout_param(it), me, n, pre_bits, inout_param(*gen_bits), win_bits
 			);
 		}
 	);
@@ -521,11 +870,13 @@ void DTC_Generator::init_entries(In_Out_Param<Thread_Pool> thread_pool)
 {
 	const size_t PRINT_PERIOD = thread_pool->num_workers() * (1 << 20);
 
-	auto gen_iterator = make_gen_iterator();
-	Concurrent_Progress_Bar progress_bar(gen_iterator.num_indices(), PRINT_PERIOD, "init_entries");
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			sp_init_entries(inout_param(gen_iterator), inout_param(progress_bar));
+	Concurrent_Progress_Bar progress_bar(m_epsi.num_positions(), PRINT_PERIOD, "init_entries");
+	// Writes both sides' entries for the visited position, reading only
+	// sub-tables.
+	run_phase(thread_pool, WHITE,
+		phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
+			sp_init_entries(inout_param(it), inout_param(progress_bar));
 		}
 	);
 	progress_bar.set_finished();
@@ -538,12 +889,12 @@ void DTC_Generator::load_win_bits(
 )
 {
 	win_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
+	run_phase(thread_pool, me,
+		phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
 			return TEMPLATE_DISPATCH(
 				(EGTB_Order_Template_Dispatch(m_entry_order)),
-				sp_load_win_bits, inout_param(gen_iterator), me, inout_param(*win_bits)
+				sp_load_win_bits, inout_param(it), me, inout_param(*win_bits)
 			);
 		}
 	);
@@ -558,10 +909,10 @@ void DTC_Generator::load_gen_bits(
 {
 	ASSERT(m_entry_order == DTC_Entry_Order::ORDER_64);
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			sp_load_gen_bits(inout_param(gen_iterator), me, n, inout_param(*gen_bits));
+	run_phase(thread_pool, me,
+		phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
+			sp_load_gen_bits(inout_param(it), me, n, inout_param(*gen_bits));
 		}
 	);
 }
@@ -600,12 +951,11 @@ void DTC_Generator::gen(In_Out_Param<Thread_Pool> thread_pool)
 {
 	printf("%s gen dtc start...\n", m_epsi.name().c_str());
 
-	for (const Color turn : { WHITE, BLACK })
-		m_dtc_file[turn].create(m_epsi.num_positions());
+	setup_storage();
 
 	open_sub_evtb();
 
-	EGTB_Bits_Pool tmp_bits(5, m_epsi.num_positions());
+	EGTB_Bits_Pool tmp_bits(5, m_epsi.num_positions(), is_paged());
 
 	m_unknown_bits[WHITE] = tmp_bits.acquire_cleared(thread_pool);
 	m_unknown_bits[BLACK] = tmp_bits.acquire_cleared(thread_pool);
@@ -631,8 +981,7 @@ void DTC_Generator::gen(In_Out_Param<Thread_Pool> thread_pool)
 	tmp_bits.release(std::move(m_unknown_bits[WHITE]));
 	tmp_bits.release(std::move(m_unknown_bits[BLACK]));
 
-	for (const Color turn : { WHITE, BLACK })
-		m_dtc_file[turn].close();
+	teardown_storage();
 }
 
 void DTC_Generator::build_steps(
@@ -763,11 +1112,13 @@ bool DTC_Generator::init_check_chase(In_Out_Param<Thread_Pool> thread_pool)
 {
 	const size_t PRINT_PERIOD = thread_pool->num_workers() * (1 << 20);
 
-	auto gen_iterator = make_gen_iterator();
-	Concurrent_Progress_Bar progress_bar(gen_iterator.num_indices(), PRINT_PERIOD, "init_check_chase");
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			return sp_init_check_chase(inout_param(gen_iterator), inout_param(progress_bar));
+	Concurrent_Progress_Bar progress_bar(m_epsi.num_positions(), PRINT_PERIOD, "init_check_chase");
+	// Takes each color as the mover in turn, so the one-ply reach is needed
+	// whichever color the slice group is.
+	const auto ret = run_phase(thread_pool, WHITE,
+		phase_pages_both_movers(1),
+		[&](Shared_Board_Index_Iterator& it) {
+			return sp_init_check_chase(inout_param(it), inout_param(progress_bar));
 		}
 	);
 	progress_bar.set_finished();
@@ -834,10 +1185,11 @@ void DTC_Generator::label_may_check_chase(
 {
 	rule_bits[WHITE].clear(thread_pool);
 	rule_bits[BLACK].clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
-			sp_label_may_check_chase(inout_param(gen_iterator), inout_param(*rule_bits));
+	// Rewrites both sides' flags for the visited position only.
+	run_phase(thread_pool, WHITE,
+		phase_pages(0, 0),
+		[&](Shared_Board_Index_Iterator& it) {
+			sp_label_may_check_chase(inout_param(it), inout_param(*rule_bits));
 		}
 	);
 }
@@ -888,12 +1240,12 @@ bool DTC_Generator::label_real_check_chase(
 )
 {
 	gen_bits->clear(thread_pool);
-	auto gen_iterator = make_gen_iterator();
-	const auto ret = thread_pool->run_sync_task_on_all_threads(
-		[&](size_t thread_id) {
+	const auto ret = run_phase(thread_pool, me,
+		phase_pages(0),
+		[&](Shared_Board_Index_Iterator& it) {
 			return TEMPLATE_DISPATCH(
 				(EGTB_Order_Template_Dispatch(m_entry_order)),
-				sp_label_real_check_chase, inout_param(gen_iterator), me, inout_param(*gen_bits)
+				sp_label_real_check_chase, inout_param(it), me, inout_param(*gen_bits)
 			);
 		}
 	);
@@ -1560,15 +1912,17 @@ bool DTC_Generator::remove_fake(
 
 	for (const Color me : { WHITE, BLACK })
 	{
-		auto gen_iterator = make_gen_iterator();
-		const auto ret = thread_pool->run_sync_task_on_all_threads(
-			[&](size_t thread_id) {
+		// check_remove_lose/win read the opponent a quiet ply on and this side
+		// one further ply after that; only the visited position is written.
+		const auto ret = run_phase(thread_pool, me,
+			phase_pages(2, 1),
+			[&](Shared_Board_Index_Iterator& it) {
 				return TEMPLATE_DISPATCH(
 					std::make_tuple(
 						EGTB_Order_Template_Dispatch(m_entry_order),
 						Remove_Fake_Template_Dispatch(type)
 					),
-					sp_remove_fake, inout_param(gen_iterator), me, n, inout_param(rule_bits[me])
+					sp_remove_fake, inout_param(it), me, n, inout_param(rule_bits[me])
 				);
 			}
 		);
@@ -1588,10 +1942,10 @@ bool DTC_Generator::remove_fake_step4(
 
 	for (const Color me : { WHITE, BLACK })
 	{
-		auto gen_iterator = make_gen_iterator();
-		const auto ret = thread_pool->run_sync_task_on_all_threads(
-			[&](size_t thread_id) {
-				return sp_remove_fake_step4(inout_param(gen_iterator), me, rule_bits[me]);
+		const auto ret = run_phase(thread_pool, me,
+			phase_pages(0),
+			[&](Shared_Board_Index_Iterator& it) {
+				return sp_remove_fake_step4(inout_param(it), me, rule_bits[me]);
 			}
 		);
 

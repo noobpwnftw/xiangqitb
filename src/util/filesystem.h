@@ -5,7 +5,9 @@
 
 #include "system/system.h"
 
+#include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
 #include <utility>
 
@@ -51,6 +53,58 @@ struct Temporary_File_Tracker
 
 private:
 	std::vector<std::filesystem::path> m_paths;
+};
+
+struct Positional_Output_File
+{
+	Positional_Output_File() = default;
+
+	Positional_Output_File(const Positional_Output_File&) = delete;
+	Positional_Output_File& operator=(const Positional_Output_File&) = delete;
+
+	Positional_Output_File(Positional_Output_File&& other) noexcept :
+		m_handle(std::exchange(other.m_handle, sys_common::INVALID_HANDLE_VALUE))
+	{
+	}
+
+	Positional_Output_File& operator=(Positional_Output_File&& other) noexcept
+	{
+		if (this != &other)
+		{
+			close_file();
+			m_handle = std::exchange(other.m_handle, sys_common::INVALID_HANDLE_VALUE);
+		}
+		return *this;
+	}
+
+	~Positional_Output_File()
+	{
+		close_file();
+	}
+
+	// Creates/truncates the file. Returns false if it could not be opened.
+	bool create(const std::filesystem::path& path)
+	{
+		const std::string str = path.string();
+		return create(str.c_str());
+	}
+
+	bool create(const char* file_name);
+
+	// Thread-safe as long as concurrently written ranges are disjoint.
+	NODISCARD bool write_at(uint64_t offset, Const_Span<uint8_t> data) const;
+
+	NODISCARD bool flush() const;
+
+	void close_file();
+
+	NODISCARD bool is_open() const
+	{
+		return m_handle != sys_common::INVALID_HANDLE_VALUE;
+	}
+
+private:
+	sys_common::Native_Handle m_handle = sys_common::INVALID_HANDLE_VALUE;
 };
 
 struct Memory_Mapped_File

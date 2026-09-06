@@ -2,6 +2,8 @@
 
 #include "egtb.h"
 #include "egtb_gen.h"
+#include "egtb_compress.h"
+#include "egtb_memory.h"
 
 #include "chess/chess.h"
 #include "chess/move.h"
@@ -36,34 +38,11 @@ struct DTM_Generator : public EGTB_Generator
 		STEP_1, STEP_2
 	};
 
-	NODISCARD static std::optional<EGTB_Generation_Info> dtm_generation_info(const Piece_Config& ps)
-	{
-		EGTB_Generation_Info info;
-		const auto maybe_num_positions = Piece_Config_For_Gen::num_positions_safe(ps);
-		if (!maybe_num_positions.has_value())
-			return std::nullopt;
-
-		info.num_positions = *maybe_num_positions;
-
-		info.memory_required_for_generation =
-			  info.num_positions * (sizeof(DTM_Final_Entry) * 2)
-			+ info.num_positions * 5 / 8; // EGTB_Bits
-
-		info.uncompressed_size = info.num_positions * (sizeof(DTM_Final_Entry) * 2);
-
-		info.uncompressed_sub_tb_size = 0;
-		for (const auto& [cap, sub_ps] : ps.sub_configs_by_capture())
-			if (sub_ps.has_any_free_attackers())
-				info.uncompressed_sub_tb_size += 
-					Piece_Config_For_Gen(sub_ps).num_positions() * (sizeof(DTM_Final_Entry) * 2);
-
-		return info;
-	}
-
 	DTM_Generator(
 		const Piece_Config& ps, 
 		bool srb,
-		const EGTB_Paths& egtb_files
+		const EGTB_Paths& egtb_files,
+		const Generation_Memory& memory
 	);
 
 	void gen(In_Out_Param<Thread_Pool> thread_pool);
@@ -79,6 +58,7 @@ protected:
 	std::atomic<DTM_Score> m_max_build_step[COLOR_NB];
 
 	EGTB_Paths m_egtb_files;
+	Generation_Memory m_memory;
 	Temporary_File_Tracker m_tmp_files;
 	bool m_save_rule_bits;
 
@@ -115,6 +95,21 @@ protected:
 	{
 		m_dtm_file[me].add_flags(pos, flag);
 	}
+
+	// Creates the two distance tables either flat or paged, following the
+	// plan, and attaches the pager in the latter case.
+	void setup_storage();
+	void teardown_storage();
+
+	NODISCARD uint64_t page_magic(Color c) const;
+
+	// Compresses one DTM table, from the flat array or by streaming the paged
+	// one in logical index order. The output bytes are identical either way.
+	NODISCARD Compressed_EGTB compress_dtm_table(
+		In_Out_Param<Thread_Pool> thread_pool,
+		Color me,
+		const EGTB_Info& info
+	);
 
 	void open_sub_egtb();
 	void close_sub_egtb();

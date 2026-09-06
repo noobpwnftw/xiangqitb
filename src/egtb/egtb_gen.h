@@ -1,6 +1,7 @@
 #pragma once
 
 #include "egtb.h"
+#include "egtb_paged.h"
 
 #include "chess/piece_config.h"
 #include "chess/position.h"
@@ -236,6 +237,21 @@ public:
 		return *m_groups[set];
 	}
 
+	// The mixed-radix weight of a group's digit in the board index.
+	NODISCARD size_t weight(Piece_Class set) const
+	{
+		ASSERT(m_groups[set]);
+		return m_weight_by_group[set];
+	}
+
+	// The radix of a group's digit. This is compress_size() for the
+	// compression group and table_size() for every other group.
+	NODISCARD size_t num_positions_in_group(Piece_Class set) const
+	{
+		ASSERT(m_groups[set]);
+		return m_num_positions_by_group[set];
+	}
+
 	NODISCARD const Piece_Group::Placement& squares(const Decomposed_Board_Index& index, Piece_Class set) const
 	{
 		const auto& info = group(set);
@@ -390,7 +406,8 @@ struct EGTB_Bits
 	EGTB_Bits(const EGTB_Bits&) = delete;
 	EGTB_Bits(EGTB_Bits&& other) noexcept :
 		m_elements(std::move(other.m_elements)),
-		m_num_bits(std::exchange(other.m_num_bits, 0))
+		m_num_bits(std::exchange(other.m_num_bits, 0)),
+		m_shared_element_writes(std::exchange(other.m_shared_element_writes, false))
 	{
 	}
 
@@ -399,6 +416,7 @@ struct EGTB_Bits
 	{
 		m_elements = std::move(other.m_elements);
 		m_num_bits = std::exchange(other.m_num_bits, 0);
+		m_shared_element_writes = std::exchange(other.m_shared_element_writes, false);
 		return *this;
 	}
 
@@ -433,22 +451,48 @@ struct EGTB_Bits
 		return true;
 	}
 
+	// Whether set_bit/clear_bit must tolerate two workers sharing an element.
+	// The flat sweep's chunks are multiples of ELEMENT_BITS, so no element is
+	// ever shared; paged dispatch hands out slice ranges, whose units start and
+	// end wherever the slice weight puts them.
+	void set_shared_element_writes(bool shared)
+	{
+		m_shared_element_writes = shared;
+	}
+
 	void set_bit(Board_Index pos)
 	{
 		ASSERT(pos < m_num_bits);
-		m_elements[pos / ELEMENT_BITS] |= (ONE << (pos % ELEMENT_BITS));
+		if (m_shared_element_writes)
+			lock_set_bit(pos);
+		else
+			m_elements[pos / ELEMENT_BITS] |= (ONE << (pos % ELEMENT_BITS));
 	}
 
 	void clear_bit(Board_Index pos)
 	{
 		ASSERT(pos < m_num_bits);
-		m_elements[pos / ELEMENT_BITS] &= ~(ONE << (pos % ELEMENT_BITS));
+		if (m_shared_element_writes)
+			atomic_fetch_and(&m_elements[pos / ELEMENT_BITS], ~(ONE << (pos % ELEMENT_BITS)));
+		else
+			m_elements[pos / ELEMENT_BITS] &= ~(ONE << (pos % ELEMENT_BITS));
 	}
 
 	void lock_set_bit(Board_Index pos)
 	{
 		ASSERT(pos < m_num_bits);
-		atomic_fetch_or(&m_elements[pos / ELEMENT_BITS], ONE << (pos % ELEMENT_BITS));
+		Underlying_Storage_Type& element = m_elements[pos / ELEMENT_BITS];
+		const Underlying_Storage_Type mask = ONE << (pos % ELEMENT_BITS);
+
+		// The frontier is marked once per predecessor and predecessors are
+		// shared, so most of these find the bit already set. Testing first
+		// leaves the line shared, where the atomic would take it exclusive
+		// every time. Within a pass these bits are only ever set, never
+		// cleared, so a skipped OR cannot lose a mark.
+		if ((element & mask) != 0)
+			return;
+
+		atomic_fetch_or(&element, mask);
 	}
 
 	NODISCARD bool bit_is_set(Board_Index pos) const
@@ -465,22 +509,38 @@ struct EGTB_Bits
 		{
 			const_iterator() = default;
 
+			// [begin, end) need not be element-aligned: the partially covered
+			// first and last elements are masked, and only the fully covered
+			// interior is bulk-scanned.
 			const_iterator(const EGTB_Bits& provider, size_t begin, size_t end) :
 				m_provider(&provider),
 				m_curr_element_bits(0)
 			{
-				// Enforce that we won't be discarding set bits from an element.
-				// Simplifies implemenation.
-				if (   (begin != provider.size() && begin % ELEMENT_BITS != 0)
-					|| (end != provider.size() && end % ELEMENT_BITS != 0))
-					throw std::runtime_error("Insufficient alignment of begin and end bit indices for set bit iterator.");
+				if (begin >= end)
+				{
+					m_curr_element = 0;
+					m_last_element = 0;
+					m_last_mask = 0;
+					m_board_index = BOARD_INDEX_NONE;
+					return;
+				}
 
-				// -1 because we increment in operator++ to get to the first to search
-				// We use ceil_div also for begin because we're either guaranteed that
-				// it's exactly divisible (in which case no rounding occurs) or
-				// begin == end, in which case we want m_curr_element == m_end_element.
-				m_curr_element = ceil_div<size_t>(begin, ELEMENT_BITS) - 1;
-				m_end_element = ceil_div<size_t>(end, ELEMENT_BITS);
+				ASSERT(end <= provider.size());
+
+				m_curr_element = begin / ELEMENT_BITS;
+				m_last_element = (end - 1) / ELEMENT_BITS;
+
+				const size_t end_bit = end % ELEMENT_BITS;
+				m_last_mask = end_bit == 0
+					? ~static_cast<Underlying_Storage_Type>(0)
+					: ((ONE << end_bit) - 1);
+
+				const Underlying_Storage_Type first_mask =
+					~static_cast<Underlying_Storage_Type>(0) << (begin % ELEMENT_BITS);
+
+				m_curr_element_bits = m_provider->element(m_curr_element) & first_mask;
+				if (m_curr_element == m_last_element)
+					m_curr_element_bits &= m_last_mask;
 
 				this->operator++();
 			}
@@ -508,15 +568,27 @@ struct EGTB_Bits
 
 			const_iterator& operator++()
 			{
-				if (m_curr_element_bits == 0)
+				while (m_curr_element_bits == 0)
 				{
-					m_curr_element += 1;
-					m_curr_element_bits = m_provider->find_next_nonzero_element(m_curr_element, m_end_element);
-					if (m_curr_element_bits == 0)
+					if (m_curr_element >= m_last_element)
 					{
 						m_board_index = BOARD_INDEX_NONE;
 						return *this;
 					}
+
+					m_curr_element += 1;
+
+					if (m_curr_element < m_last_element)
+					{
+						m_curr_element_bits =
+							m_provider->find_next_nonzero_element(m_curr_element, m_last_element);
+						if (m_curr_element_bits != 0)
+							break;
+						// The scan is exhausted, so it stopped on the last element.
+					}
+
+					ASSERT(m_curr_element == m_last_element);
+					m_curr_element_bits = m_provider->element(m_last_element) & m_last_mask;
 				}
 
 				m_board_index = static_cast<Board_Index>(pop_first_bit(m_curr_element_bits) + m_curr_element * ELEMENT_BITS);
@@ -532,7 +604,8 @@ struct EGTB_Bits
 		private:
 			const EGTB_Bits* m_provider;
 			size_t m_curr_element;
-			size_t m_end_element;
+			size_t m_last_element;                      // inclusive
+			Underlying_Storage_Type m_last_mask;
 			Underlying_Storage_Type m_curr_element_bits;
 			Board_Index m_board_index;
 		};
@@ -568,6 +641,12 @@ struct EGTB_Bits
 private:
 	Huge_Array<Underlying_Storage_Type> m_elements;
 	size_t m_num_bits;
+	bool m_shared_element_writes = false;
+
+	NODISCARD Underlying_Storage_Type element(size_t idx) const
+	{
+		return m_elements[idx];
+	}
 
 	void alloc(size_t pos_cnt)
 	{
@@ -608,12 +687,15 @@ private:
 
 struct EGTB_Bits_Pool
 {
-	EGTB_Bits_Pool(size_t pool_size, size_t bits_size) :
-		m_num_bits(bits_size)
+	// `shared_element_writes` is forwarded to every bitset handed out.
+	EGTB_Bits_Pool(size_t pool_size, size_t bits_size, bool shared_element_writes) :
+		m_num_bits(bits_size),
+		m_shared_element_writes(shared_element_writes)
 	{
 		for (size_t i = 0; i < pool_size; ++i)
 		{
 			m_pool.emplace_back(bits_size, false);
+			m_pool.back().first.set_shared_element_writes(shared_element_writes);
 		}
 	}
 
@@ -647,6 +729,7 @@ struct EGTB_Bits_Pool
 	{
 		if (bits.size() != m_num_bits)
 			throw std::runtime_error("Tried to release bits of wrong size.");
+		bits.set_shared_element_writes(m_shared_element_writes);
 		m_pool.emplace_back(std::move(bits), true);
 	}
 
@@ -658,6 +741,7 @@ struct EGTB_Bits_Pool
 private:
 	std::vector<std::pair<EGTB_Bits, bool>> m_pool;
 	size_t m_num_bits;
+	bool m_shared_element_writes;
 };
 
 #define VERIFY_EGTB_GEN_ACCESS_CONSISTENCY false
@@ -769,8 +853,18 @@ struct EGTB_File_For_Gen_Consistency_Check
 
 #endif
 
+// A distance/entry array for generation, in one of two modes.
+//
+//   FLAT  - one contiguous Huge_Array indexed directly by Board_Index, chosen
+//           whenever the table fits the budget.
+//   PAGED - cut along the slice dimension into pages that spill to `tmpdir`.
+//           Board_Index is translated to (slice, offset) and then to a page.
+//
+// Logical indexing is identical in both modes: nothing is renumbered.
 template <typename MainEntryT, typename... OtherEntryTs>
-struct EGTB_File_For_Gen : public EGTB_File_For_Gen_Consistency_Check<MainEntryT, OtherEntryTs...>
+struct EGTB_File_For_Gen :
+	public EGTB_File_For_Gen_Consistency_Check<MainEntryT, OtherEntryTs...>,
+	public Pageable_Table
 {
 	static constexpr size_t NUM_ENTRY_VARIANTS = 1 + sizeof...(OtherEntryTs);
 	static constexpr size_t ENTRY_SIZE = sizeof(MainEntryT);
@@ -783,24 +877,70 @@ struct EGTB_File_For_Gen : public EGTB_File_For_Gen_Consistency_Check<MainEntryT
 
 	EGTB_File_For_Gen() = default;
 
-	~EGTB_File_For_Gen()
+	~EGTB_File_For_Gen() override
 	{
+		// Covers the exception path too, so an aborted run leaves nothing
+		// behind in tmpdir.
+		remove_scratch_files();
 		close();
 	}
 
+	// Flat mode: the whole table resident, indexed directly.
 	void create(size_t sz)
 	{
 		Consistency::on_create(sz);
+		m_num_entries = sz;
+		m_paged = false;
 		m_entries = Huge_Array<Underlying_Entry_Type>(For_Overwrite_Tag{}, sz);
+	}
+
+	// Paged mode. Page files are named "<scratch_prefix>.p<page>"; `magic`
+	// guards against a stale file from another table being read back.
+	void create_paged(
+		const Slice_Layout& slices,
+		const Page_Layout& pages,
+		std::filesystem::path scratch_prefix,
+		uint64_t magic
+	)
+	{
+		Consistency::on_create(slices.num_entries());
+
+		m_paged = true;
+		m_num_entries = slices.num_entries();
+		m_slices = slices;
+		m_pages = pages;
+		m_scratch_prefix = std::move(scratch_prefix);
+		m_magic = magic;
+
+		m_page_data.clear();
+		m_page_data.resize(m_pages.num_pages());
+		m_page_base.assign(m_pages.num_pages(), nullptr);
+		m_dirty.assign(m_pages.num_pages(), 0);
+
+		// A page left by an aborted run has a valid magic and would be read back
+		// as live data.
+		remove_scratch_files();
+
+		// Precomputed physical placement of every slice, in one array so that
+		// the accessor needs a single lookup and no division beyond the ones in
+		// Slice_Layout::locate.
+		m_placement.resize(m_slices.num_slices());
+		for (size_t s = 0; s < m_slices.num_slices(); ++s)
+		{
+			const size_t page = m_pages.page_of_slice(s);
+			m_placement[s] = Slice_Placement{
+				(s - m_pages.first_slice_of_page(page)) * m_slices.slice_size(),
+				page
+			};
+		}
 	}
 
 	template <size_t N = NUM_ENTRY_VARIANTS>
 	NODISCARD std::enable_if_t<N == 1, MainEntryT> read(Board_Index pos) const
 	{
-		ASSERT(pos < m_entries.size());
 		Consistency::template on_read<MainEntryT>(pos);
 		MainEntryT entry;
-		std::memcpy(&entry, m_entries.data() + pos, sizeof(MainEntryT));
+		std::memcpy(&entry, entry_ptr(pos), sizeof(MainEntryT));
 		return entry;
 	}
 
@@ -809,10 +949,9 @@ struct EGTB_File_For_Gen : public EGTB_File_For_Gen_Consistency_Check<MainEntryT
 	{
 		static_assert(   std::is_same_v<T, MainEntryT> || (std::is_same_v<T, OtherEntryTs> || ...) 
 			          || std::is_base_of_v<T, MainEntryT> || (std::is_base_of_v<T, OtherEntryTs> || ...));
-		ASSERT(pos < m_entries.size());
 		Consistency::template on_read<T>(pos);
 		T entry;
-		std::memcpy(&entry, m_entries.data() + pos, sizeof(T));
+		std::memcpy(&entry, entry_ptr(pos), sizeof(T));
 		return entry;
 	}
 
@@ -820,9 +959,8 @@ struct EGTB_File_For_Gen : public EGTB_File_For_Gen_Consistency_Check<MainEntryT
 	void write(const T& tt, Board_Index pos)
 	{
 		static_assert(std::is_same_v<T, MainEntryT> || (std::is_same_v<T, OtherEntryTs> || ...));
-		ASSERT(pos < m_entries.size());
 		Consistency::template on_write<T>(pos);
-		std::memcpy(m_entries.data() + pos, &tt, sizeof(T));
+		std::memcpy(entry_ptr_for_write(pos), &tt, sizeof(T));
 	}
 
 	template<typename T>
@@ -830,9 +968,8 @@ struct EGTB_File_For_Gen : public EGTB_File_For_Gen_Consistency_Check<MainEntryT
 	{
 		static_assert(sizeof(T) == sizeof(Underlying_Entry_Type));
 		static_assert(MainEntryT::template is_allowed_flag_type<T> || (OtherEntryTs::template is_allowed_flag_type<T> || ...));
-		ASSERT(pos < m_entries.size());
 		Consistency::template on_flag_change<T>(pos);
-		atomic_fetch_or(m_entries.data() + pos, flags);
+		atomic_fetch_or(entry_ptr_for_write(pos), flags);
 	}
 
 	template<typename T>
@@ -841,27 +978,175 @@ struct EGTB_File_For_Gen : public EGTB_File_For_Gen_Consistency_Check<MainEntryT
 		static_assert(sizeof(T) == sizeof(Underlying_Entry_Type));
 		static_assert(MainEntryT::template is_allowed_flag_type<T> || (OtherEntryTs::template is_allowed_flag_type<T> || ...));
 		Consistency::template on_flag_change<T>(pos);
-		ASSERT(pos < m_entries.size());
-		m_entries[pos] |= static_cast<Underlying_Entry_Type>(flags);
+		*entry_ptr_for_write(pos) |= static_cast<Underlying_Entry_Type>(flags);
 	}
 
 	void close()
 	{
 		m_entries.clear();
+		m_page_data.clear();
+		m_page_base.clear();
+		m_dirty.clear();
+		m_placement.clear();
+		m_paged = false;
+		m_num_entries = 0;
 	}
 
+	void remove_scratch_files()
+	{
+		if (!m_paged)
+			return;
+		std::error_code ec;
+		for (size_t p = 0; p < m_pages.num_pages(); ++p)
+			std::filesystem::remove(page_path(p), ec);
+	}
+
+	// Flat mode only; paged tables are swept in logical index order instead.
 	NODISCARD Const_Span<Underlying_Entry_Type> entry_span() const
 	{
+		ASSERT(!m_paged);
 		return Const_Span<Underlying_Entry_Type>(m_entries);
 	}
 
 	NODISCARD Const_Span<uint8_t> data_span() const
 	{
+		ASSERT(!m_paged);
 		return Const_Span(reinterpret_cast<const uint8_t*>(m_entries.data()), m_entries.size() * ENTRY_SIZE);
 	}
 
+	// Pageable_Table.
+
+	NODISCARD size_t num_pages() const override
+	{
+		return m_paged ? m_pages.num_pages() : 0;
+	}
+
+	NODISCARD bool is_page_resident(size_t page) const override
+	{
+		ASSERT(m_paged);
+		return m_page_data[page].size() != 0;
+	}
+
+	NODISCARD bool is_page_dirty(size_t page) const override
+	{
+		ASSERT(m_paged);
+		return m_dirty[page] != 0;
+	}
+
+	void load_page(size_t page) override
+	{
+		ASSERT(m_paged);
+		if (is_page_resident(page))
+			return;
+
+		const std::filesystem::path path = page_path(page);
+		const bool spilled = std::filesystem::exists(path);
+
+		// Uninitialized on first touch, exactly as the flat path is: the init
+		// pass writes every entry before anything reads it.
+		m_page_data[page] = Huge_Array<Underlying_Entry_Type>(For_Overwrite_Tag{}, page_entries(page));
+
+		if (spilled)
+			load_page_raw(
+				Span<uint8_t>(reinterpret_cast<uint8_t*>(m_page_data[page].data()), page_bytes(page)),
+				path,
+				m_magic);
+
+		m_page_base[page] = m_page_data[page].data();
+		m_dirty[page] = 0;
+	}
+
+	void evict_page(size_t page) override
+	{
+		ASSERT(m_paged);
+		if (!is_page_resident(page))
+			return;
+
+		if (m_dirty[page] != 0)
+		{
+			save_page_raw(
+				Const_Span<uint8_t>(reinterpret_cast<const uint8_t*>(m_page_data[page].data()), page_bytes(page)),
+				page_path(page),
+				m_magic);
+			m_dirty[page] = 0;
+		}
+
+		m_page_base[page] = nullptr;
+		m_page_data[page] = Huge_Array<Underlying_Entry_Type>{};
+	}
+
 private:
+	bool m_paged = false;
+	size_t m_num_entries = 0;
+
+	// FLAT mode.
 	Huge_Array<Underlying_Entry_Type> m_entries;
+
+	// PAGED mode.
+	Slice_Layout m_slices;
+	Page_Layout m_pages;
+	std::vector<Huge_Array<Underlying_Entry_Type>> m_page_data;
+	// Each resident page's base pointer, null otherwise. Redundant with
+	// m_page_data, but it saves the accessor one dependent load.
+	std::vector<Underlying_Entry_Type*> m_page_base;
+	std::vector<uint8_t> m_dirty;
+
+	struct Slice_Placement
+	{
+		size_t base_in_page;
+		size_t page;
+	};
+	std::vector<Slice_Placement> m_placement;
+	std::filesystem::path m_scratch_prefix;
+	uint64_t m_magic = 0;
+
+	NODISCARD size_t page_entries(size_t page) const
+	{
+		return m_pages.slices_in_page(page) * m_slices.slice_size();
+	}
+
+	NODISCARD size_t page_bytes(size_t page) const
+	{
+		return page_entries(page) * ENTRY_SIZE;
+	}
+
+	NODISCARD std::filesystem::path page_path(size_t page) const
+	{
+		return m_scratch_prefix.string() + ".p" + std::to_string(page);
+	}
+
+	// The single point that translates a logical Board_Index into storage. In
+	// paged mode the containing page must be pinned by the caller's dispatch,
+	// and the returned pointer is valid only for that lease.
+	NODISCARD INLINE const Underlying_Entry_Type* entry_ptr(Board_Index pos) const
+	{
+		ASSERT(static_cast<size_t>(pos) < m_num_entries);
+		if (!m_paged)
+			return m_entries.data() + static_cast<size_t>(pos);
+
+		const Slice_Layout::Location loc = m_slices.locate(pos);
+		const Slice_Placement& at = m_placement[loc.slice];
+		const Underlying_Entry_Type* const base = m_page_base[at.page];
+		ASSERT(base != nullptr);
+		return base + at.base_in_page + loc.offset;
+	}
+
+	// As above, and marks the page dirty, so a page is spilled on eviction only
+	// if something actually wrote to it.
+	NODISCARD INLINE Underlying_Entry_Type* entry_ptr_for_write(Board_Index pos)
+	{
+		ASSERT(static_cast<size_t>(pos) < m_num_entries);
+		if (!m_paged)
+			return m_entries.data() + static_cast<size_t>(pos);
+
+		const Slice_Layout::Location loc = m_slices.locate(pos);
+		const Slice_Placement& at = m_placement[loc.slice];
+		Underlying_Entry_Type* const base = m_page_base[at.page];
+		ASSERT(base != nullptr);
+		if (m_dirty[at.page] == 0)
+			m_dirty[at.page] = 1;
+		return base + at.base_in_page + loc.offset;
+	}
 };
 
 template <>
@@ -881,17 +1166,23 @@ struct EGTB_File_For_Gen<WDL_Entry>
 	{
 		const size_t size = ceil_div(num_entries, WDL_ENTRY_PACK_RATIO);
 		m_packed_entries = Huge_Array<Packed_WDL_Entries>(For_Overwrite_Tag{}, size);
-		this->m_num_entries = num_entries;
+		m_num_entries = num_entries;
 
 		// Fill padding. We use DRAW instead of ILLEGAL to maintain backwards compatibility.
 		for (size_t i = num_entries; i < size * WDL_ENTRY_PACK_RATIO; ++i)
-			set_wdl_entry(m_packed_entries[i / 4], i % 4, WDL_Entry::DRAW);
+			set_wdl_entry(m_packed_entries[i / WDL_ENTRY_PACK_RATIO],
+				i % WDL_ENTRY_PACK_RATIO, WDL_Entry::DRAW);
 	}
 
+	// Four entries share a byte, so this read-modify-write is only safe while no
+	// two workers hold neighbouring positions. Its one caller is the unpaged
+	// sweep, whose chunks are multiples of the pack ratio; a paged run derives
+	// the projection into a buffer of its own (DTC_Generator::next_wdl_band).
 	void write(Board_Index pos, WDL_Entry new_value)
 	{
 		ASSERT(pos < m_num_entries);
-		set_wdl_entry(m_packed_entries[pos / 4], pos % 4, new_value);
+		set_wdl_entry(m_packed_entries[pos / WDL_ENTRY_PACK_RATIO],
+			pos % WDL_ENTRY_PACK_RATIO, new_value);
 	}
 
 	void close()
@@ -918,6 +1209,22 @@ using WDL_File_For_Gen = EGTB_File_For_Gen<WDL_Entry>;
 using DTC_File_For_Gen = EGTB_File_For_Gen<DTC_Intermediate_Entry, DTC_Final_Entry>;
 using DTM_File_For_Gen = EGTB_File_For_Gen<DTM_Intermediate_Entry, DTM_Final_Entry>;
 
+// Shared work source for a generation pass.
+//
+// A plan is a set of equally long *runs* of consecutive Board_Index values:
+//
+//   FLAT  - a single run covering [start, end), what every unpaged pass uses.
+//   SLICE - one run per `high` step, each covering the logical indices of
+//           slices [slice_begin, slice_end) at that step. Adjacent slices are
+//           adjacent in the logical index at fixed `high`, so a page of
+//           adjacent slices needs one run per step rather than one per index.
+//
+// Runs are split into work units of at most `chunk_size` indices and handed
+// out in batches, so that a long run is shared out rather than given whole to
+// one worker and a short run does not cost an atomic per index.
+//
+// Consumers only ever see (begin, end) pairs, so the four sub-iterators below
+// are plan-agnostic.
 struct Shared_Board_Index_Iterator
 {
 private:
@@ -948,11 +1255,37 @@ private:
 	};
 
 public:
+	// Per-consumer cursor over the shared provider's work units.
+	struct Run_Source
+	{
+		explicit Run_Source(Shared_Board_Index_Iterator& provider) :
+			m_provider(&provider)
+		{
+		}
+
+		NODISCARD std::pair<Board_Index, Board_Index> next_range()
+		{
+			if (m_next == m_batch_end)
+			{
+				const auto [first, last] = m_provider->claim_unit_batch();
+				m_next = first;
+				m_batch_end = last;
+				if (m_next == m_batch_end)
+					return m_provider->empty_range();
+			}
+			return m_provider->unit(m_next++);
+		}
+
+	private:
+		Shared_Board_Index_Iterator* m_provider;
+		size_t m_next = 0;
+		size_t m_batch_end = 0;
+	};
 
 	struct Chunk_Iterator : Sentineled_Self_Iterator<Chunk_Iterator>
 	{
 		explicit Chunk_Iterator(Shared_Board_Index_Iterator& provider) :
-			m_provider(&provider)
+			m_runs(provider)
 		{
 			this->operator++();
 		}
@@ -964,7 +1297,7 @@ public:
 
 		Chunk_Iterator& operator++()
 		{
-			auto [s, e] = this->m_provider->next_range();
+			auto [s, e] = m_runs.next_range();
 			m_chunk_start = s;
 			m_chunk_end = e;
 			return *this;
@@ -976,7 +1309,7 @@ public:
 		}
 
 	private:
-		Shared_Board_Index_Iterator* m_provider;
+		Run_Source m_runs;
 		Board_Index m_chunk_start;
 		Board_Index m_chunk_end;
 	};
@@ -984,9 +1317,9 @@ public:
 	struct Index_Iterator : Sentineled_Self_Iterator<Index_Iterator>
 	{
 		explicit Index_Iterator(Shared_Board_Index_Iterator& provider) :
-			m_provider(&provider)
+			m_runs(provider)
 		{
-			auto [s, e] = this->m_provider->next_range();
+			auto [s, e] = m_runs.next_range();
 			m_chunk_curr = s;
 			m_chunk_end = e;
 		}
@@ -1002,7 +1335,7 @@ public:
 
 			if (m_chunk_curr == m_chunk_end)
 			{
-				auto [s, e] = this->m_provider->next_range();
+				auto [s, e] = m_runs.next_range();
 				m_chunk_curr = s;
 				m_chunk_end = e;
 			}
@@ -1016,7 +1349,7 @@ public:
 		}
 
 	private:
-		Shared_Board_Index_Iterator* m_provider;
+		Run_Source m_runs;
 		Board_Index m_chunk_curr;
 		Board_Index m_chunk_end;
 	};
@@ -1024,14 +1357,14 @@ public:
 	struct Sparse_Index_Iterator : Sentineled_Self_Iterator<Sparse_Index_Iterator>
 	{
 		Sparse_Index_Iterator(Shared_Board_Index_Iterator& provider, const EGTB_Bits& bits) :
-			m_provider(&provider),
+			m_runs(provider),
 			m_bits(&bits)
 		{
-			ASSERT(provider.num_indices() == bits.size());
+			ASSERT(provider.index_space() == bits.size());
 
 			for (;;)
 			{
-				auto [s, e] = this->m_provider->next_range();
+				auto [s, e] = m_runs.next_range();
 				m_set_bits_curr = m_bits->set_bits(s, e).begin(); // This is okay, because Set_Bits_View is just a view.
 
 				if (s == e || !m_set_bits_curr.is_end())
@@ -1049,7 +1382,7 @@ public:
 			++m_set_bits_curr;
 			while (m_set_bits_curr.is_end())
 			{
-				auto [s, e] = this->m_provider->next_range();
+				auto [s, e] = m_runs.next_range();
 				if (s == e)
 					break;
 
@@ -1065,7 +1398,7 @@ public:
 		}
 
 	private:
-		Shared_Board_Index_Iterator* m_provider;
+		Run_Source m_runs;
 		const EGTB_Bits* m_bits;
 		EGTB_Bits::Set_Bits_View::const_iterator m_set_bits_curr;
 	};
@@ -1073,8 +1406,8 @@ public:
 	struct Board_Iterator : Sentineled_Self_Iterator<Board_Iterator>
 	{
 		Board_Iterator(Shared_Board_Index_Iterator& provider, const Piece_Config_For_Gen& epsi, Color turn = WHITE) :
-			m_provider(&provider),
-			m_chunk(this->m_provider->next_range()),
+			m_runs(provider),
+			m_chunk(m_runs.next_range()),
 			m_pos_gen(epsi, m_chunk.first, turn) // doesn't fail on illegal index so it's fine
 		{
 		}
@@ -1090,7 +1423,7 @@ public:
 
 			if (m_chunk.first == m_chunk.second)
 			{
-				m_chunk = this->m_provider->next_range();
+				m_chunk = m_runs.next_range();
 				if (!is_end())
 					m_pos_gen.set_board_index(m_chunk.first);
 			}
@@ -1111,35 +1444,40 @@ public:
 		}
 
 	private:
-		Shared_Board_Index_Iterator* m_provider;
+		Run_Source m_runs;
 		std::pair<Board_Index, Board_Index> m_chunk;
 		Position_For_Gen m_pos_gen;
 	};
 
-	Shared_Board_Index_Iterator(Board_Index start_idx, Board_Index end_idx, size_t chunk_size) :
-		m_start_idx(start_idx),
-		m_end_idx(end_idx),
-		m_chunk_size(chunk_size),
-		m_current_chunk_index(0)
+	// FLAT plan: one run covering [start, end).
+	Shared_Board_Index_Iterator(Board_Index start_idx, Board_Index end_idx, size_t chunk_size)
 	{
+		init(start_idx, 0, static_cast<size_t>(end_idx - start_idx), 1,
+			chunk_size, static_cast<size_t>(end_idx));
+	}
+
+	// SLICE plan: one run per `high` step, each holding the logical indices of
+	// slices [slice_begin, slice_end) at that step.
+	Shared_Board_Index_Iterator(
+		const Slice_Layout& layout,
+		size_t slice_begin,
+		size_t slice_end,
+		size_t chunk_size
+	)
+	{
+		ASSERT(slice_begin < slice_end);
+		ASSERT(slice_end <= layout.num_slices());
+
+		init(
+			layout.run_begin(slice_begin, 0),
+			layout.low_weight() * layout.num_slices(),
+			layout.low_weight() * (slice_end - slice_begin),
+			layout.num_high(),
+			chunk_size,
+			layout.num_entries());
 	}
 
 	Shared_Board_Index_Iterator(const Shared_Board_Index_Iterator&) = delete;
-
-	NODISCARD std::pair<Board_Index, Board_Index> next_range()
-	{
-		const size_t chunk_index = m_current_chunk_index.fetch_add(1);
-
-		// This should not happen because it's 64-bit index. 
-		// Ideally we would do a saturating fetch add, 
-		// but it would require either locking or more complex logic.
-		ASSERT(chunk_index != std::numeric_limits<size_t>::max());
-
-		const Board_Index chunk_start = std::min(m_start_idx + chunk_index * m_chunk_size, m_end_idx);
-		const Board_Index chunk_end = std::min(chunk_start + m_chunk_size, m_end_idx);
-
-		return { chunk_start, chunk_end };
-	}
 
 	NODISCARD Chunk_Iterator chunks()
 	{
@@ -1161,24 +1499,88 @@ public:
 		return Board_Iterator(*this, epsi, turn);
 	}
 
+	// Indices this plan yields.
 	NODISCARD size_t num_indices() const
 	{
-		return m_end_idx - m_start_idx;
+		return m_num_indices;
+	}
+
+	// Size of the whole index space the plan is a subset of. Bitsets stay
+	// full-size and resident, so they are sized against this, not num_indices.
+	NODISCARD size_t index_space() const
+	{
+		return m_index_space;
 	}
 
 private:
-	Board_Index m_start_idx;
-	Board_Index m_end_idx;
-	size_t m_chunk_size;
-	std::atomic<size_t> m_current_chunk_index;
-};
+	Board_Index m_start_idx = BOARD_INDEX_ZERO;
+	size_t m_run_stride = 0;
+	size_t m_run_length = 0;
+	size_t m_num_runs = 0;
 
-struct EGTB_Generation_Info
-{
-	size_t num_positions;
-	size_t uncompressed_size;
-	size_t uncompressed_sub_tb_size;
-	size_t memory_required_for_generation;
+	size_t m_unit_length = 0;
+	size_t m_units_per_run = 0;
+	size_t m_num_units = 0;
+	// Units handed out per atomic step: one when a unit is a full chunk,
+	// several when the runs are short.
+	size_t m_units_per_batch = 1;
+
+	size_t m_num_indices = 0;
+	size_t m_index_space = 0;
+	std::atomic<size_t> m_next_batch{ 0 };
+
+	void init(
+		Board_Index start_idx,
+		size_t run_stride,
+		size_t run_length,
+		size_t num_runs,
+		size_t chunk_size,
+		size_t index_space
+	)
+	{
+		m_start_idx = start_idx;
+		m_run_stride = run_stride;
+		m_run_length = run_length;
+		m_num_runs = run_length == 0 ? 0 : num_runs;
+
+		m_unit_length = std::max<size_t>(1, std::min(run_length, chunk_size));
+		m_units_per_run = ceil_div(run_length, m_unit_length);
+		m_num_units = m_num_runs * m_units_per_run;
+		m_units_per_batch = std::max<size_t>(1, chunk_size / m_unit_length);
+
+		m_num_indices = m_num_runs * run_length;
+		m_index_space = index_space;
+	}
+
+	NODISCARD std::pair<Board_Index, Board_Index> empty_range() const
+	{
+		return { m_start_idx, m_start_idx };
+	}
+
+	NODISCARD std::pair<size_t, size_t> claim_unit_batch()
+	{
+		const size_t batch = m_next_batch.fetch_add(1, std::memory_order_relaxed);
+
+		// This should not happen because it's a 64-bit counter. Ideally we
+		// would do a saturating fetch add, but it would require either locking
+		// or more complex logic.
+		ASSERT(batch != std::numeric_limits<size_t>::max());
+
+		const size_t first = std::min(batch * m_units_per_batch, m_num_units);
+		const size_t last = std::min(first + m_units_per_batch, m_num_units);
+		return { first, last };
+	}
+
+	NODISCARD std::pair<Board_Index, Board_Index> unit(size_t unit_index) const
+	{
+		ASSERT(unit_index < m_num_units);
+
+		const size_t run = m_units_per_run == 1 ? unit_index : unit_index / m_units_per_run;
+		const size_t offset = (unit_index - run * m_units_per_run) * m_unit_length;
+
+		const Board_Index begin = m_start_idx + run * m_run_stride + offset;
+		return { begin, begin + std::min(m_unit_length, m_run_length - offset) };
+	}
 };
 
 struct EGTB_Generator
@@ -1202,10 +1604,175 @@ protected:
 
 	bool m_is_symmetric;
 
+	// Slice geometry of this material. Always valid; only used when paging.
+	Slice_Layout m_slice_layout;
+
+	NODISCARD bool is_paged() const { return m_paged; }
+
+	// Switches this generator to paged dispatch over `tables`, indexed by
+	// color. `capacity_pages` caps residency, raised to the generation floor
+	// if it is below it, since a dispatch's whole pin set must fit.
+	void enable_paging(
+		const Page_Layout& pages,
+		std::vector<Pageable_Table*> tables,
+		size_t capacity_pages
+	);
+
+	void disable_paging();
+
+	NODISCARD const Page_Layout& page_layout() const { return m_page_layout; }
+	NODISCARD Page_Cache& page_cache() const { return *m_page_cache; }
+
+	// Leases the pages of `table`'s closed one-ply slice reach around `pos` for
+	// the lifetime of the returned guard, on top of whatever the current
+	// dispatch already holds. One branch of the check/chase look-ahead reads a
+	// slice ply past what its dispatch declares; declaring that reach up front
+	// would widen the floor for every dispatch of the pass. The pass is
+	// single-threaded, so the lease costs only the pager's bookkeeping.
+	NODISCARD Pinned_Pages lease_one_ply_reach(Color table, Board_Index pos) const;
+
 	NODISCARD Board_Index next_cap_index(const Position_For_Gen& pos_for_gen, Move move) const;
 	NODISCARD Board_Index next_quiet_index(const Position_For_Gen& pos_for_gen, Move move) const;
 	NODISCARD Board_Index next_quiet_index(const Position_For_Gen& pos_for_gen, Move move, Out_Param<bool> mirr) const;
 	NODISCARD Fixed_Vector<Board_Index, 2> next_quiet_index_with_mirror(const Position_For_Gen& pos_for_gen, Move move) const;
 
 	NODISCARD Shared_Board_Index_Iterator make_gen_iterator() const;
+	NODISCARD Shared_Board_Index_Iterator make_page_iterator(size_t page) const;
+
+	// Memory the final logical-order sweep may use for one band. The page cache
+	// is flushed by then, so the pages' budget is free.
+	NODISCARD size_t sweep_band_budget_bytes() const { return m_sweep_band_budget_bytes; }
+	void set_sweep_band_budget_bytes(size_t bytes) { m_sweep_band_budget_bytes = bytes; }
+
+	// Runs `body(iterator)` over the whole index space, once per dispatch.
+	//
+	// Unpaged, or for a pass that dereferences no distance entry, there is a
+	// single dispatch over the flat index space. Paged, the space is dispatched
+	// one page of the mover's table at a time, with exactly the pages that pass
+	// can touch pinned for the duration. Pins are taken and dropped by this
+	// thread around the parallel region, so a worker can never hold a pointer
+	// into a page whose lease has ended.
+	//
+	// Results from every dispatch are concatenated; the callers either any_of()
+	// them or consolidate them, both of which are order independent.
+	template <typename Fn>
+	auto run_phase(In_Out_Param<Thread_Pool> thread_pool, Color me, Phase_Pages pages, Fn&& body)
+	{
+		using Result = decltype(body(std::declval<Shared_Board_Index_Iterator&>()));
+
+		if constexpr (std::is_same_v<Result, void>)
+		{
+			for_each_dispatch(thread_pool, me, pages, [&](Shared_Board_Index_Iterator& it) {
+				thread_pool->run_sync_task_on_all_threads([&](size_t) { body(it); });
+			});
+		}
+		else
+		{
+			Vector_Not_Bool<Result> all;
+			for_each_dispatch(thread_pool, me, pages, [&](Shared_Board_Index_Iterator& it) {
+				auto part = thread_pool->run_sync_task_on_all_threads(
+					[&](size_t) { return body(it); });
+				for (auto& value : part)
+					all.emplace_back(std::move(value));
+			});
+			return all;
+		}
+	}
+
+	// Same dispatch, but the body runs on the calling thread only. The pool is
+	// still used to page the dispatch's set in.
+	template <typename Fn>
+	auto run_phase_on_this_thread(
+		In_Out_Param<Thread_Pool> thread_pool,
+		Color me,
+		Phase_Pages pages,
+		Fn&& body
+	)
+	{
+		using Result = decltype(body(std::declval<Shared_Board_Index_Iterator&>()));
+
+		if constexpr (std::is_same_v<Result, void>)
+		{
+			for_each_dispatch(thread_pool, me, pages, [&](Shared_Board_Index_Iterator& it) { body(it); });
+		}
+		else
+		{
+			Vector_Not_Bool<Result> all;
+			for_each_dispatch(thread_pool, me, pages, [&](Shared_Board_Index_Iterator& it) {
+				all.emplace_back(body(it));
+			});
+			return all;
+		}
+	}
+
+private:
+	bool m_paged = false;
+	Color m_slice_color = WHITE;
+	size_t m_sweep_band_budget_bytes = 256ull * 1024 * 1024;
+	Page_Layout m_page_layout;
+	Slice_Reach m_slice_reach;
+	std::unique_ptr<Page_Cache> m_page_cache;
+
+	// Scratch page bitmaps and the pages set in them, one pair per table, plus
+	// the pin set built from them, reused across dispatches. Only the
+	// dispatching thread touches them.
+	std::vector<uint8_t> m_page_needed[COLOR_NB];
+	std::vector<size_t> m_page_touched[COLOR_NB];
+	std::vector<Page_Cache::Key> m_page_pin_set;
+
+	// Marks the pages of `table_idx` a dispatch of slices [slice_begin,
+	// slice_end) needs at a given slice-group closure depth, appending the
+	// newly marked ones to m_page_touched.
+	void mark_needed_pages(size_t table_idx, size_t slice_begin, size_t slice_end, int slice_plies);
+
+	template <typename Each>
+	void for_each_dispatch(
+		In_Out_Param<Thread_Pool> thread_pool,
+		Color me,
+		Phase_Pages pages,
+		Each&& each
+	)
+	{
+		if (!m_paged || (pages.me == PHASE_PLIES_NONE && pages.opp == PHASE_PLIES_NONE))
+		{
+			// Either everything is resident, or the pass never dereferences a
+			// distance entry, so no lease is needed.
+			Shared_Board_Index_Iterator it = make_gen_iterator();
+			each(it);
+			return;
+		}
+
+		const size_t me_table = static_cast<size_t>(me);
+		const size_t opp_table = static_cast<size_t>(color_opp(me));
+
+		for (size_t page = 0; page < m_page_layout.num_pages(); ++page)
+		{
+			const size_t slice_begin = m_page_layout.first_slice_of_page(page);
+			const size_t slice_end = m_page_layout.end_slice_of_page(page);
+
+			for (size_t table = 0; table < COLOR_NB; ++table)
+			{
+				for (const size_t p : m_page_touched[table])
+					m_page_needed[table][p] = 0;
+				m_page_touched[table].clear();
+			}
+
+			mark_needed_pages(me_table, slice_begin, slice_end,
+				dispatch_slice_plies(pages.me, me, m_slice_color, pages.plies_start_with_mover));
+			mark_needed_pages(opp_table, slice_begin, slice_end,
+				dispatch_slice_plies(pages.opp, me, m_slice_color, pages.plies_start_with_mover));
+
+			m_page_pin_set.clear();
+			for (size_t table = 0; table < COLOR_NB; ++table)
+				for (const size_t p : m_page_touched[table])
+					m_page_pin_set.emplace_back(table, p);
+
+			Pinned_Pages pins(*m_page_cache);
+			pins.pin_all(
+				thread_pool, Const_Span<Page_Cache::Key>(m_page_pin_set), opp_table);
+
+			Shared_Board_Index_Iterator it = make_page_iterator(page);
+			each(it);
+		}
+	}
 };
