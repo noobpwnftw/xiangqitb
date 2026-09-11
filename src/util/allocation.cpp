@@ -67,11 +67,13 @@ NODISCARD void* allocate_large_pages(size_t bytes)
 
 #elif defined(OS_LINUX)
 
-	// Assumed 2MiB, hard to retrieve programmatically.
-	constexpr size_t LARGE_PAGE_SIZE = 2048 * 1024;
-	const size_t allocation_size = ceil_to_multiple(bytes, LARGE_PAGE_SIZE);
-	void* ptr = nullptr;
-	if (posix_memalign(&ptr, LARGE_PAGE_SIZE, allocation_size) != 0)
+	if (bytes == 0)
+		return nullptr;
+
+	const size_t allocation_size = large_page_bytes(bytes);
+	void* const ptr = mmap(nullptr, allocation_size, PROT_READ | PROT_WRITE,
+	                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (ptr == MAP_FAILED)
 		return nullptr;
 	madvise(ptr, allocation_size, MADV_HUGEPAGE);
 	return ptr;
@@ -82,17 +84,18 @@ NODISCARD void* allocate_large_pages(size_t bytes)
 #endif
 }
 
-void deallocate_large_pages(void* ptr)
+void deallocate_large_pages(void* ptr, size_t bytes)
 {
 #if defined(OS_WINDOWS)
 
+	(void)bytes;
 	if (ptr != nullptr)
 		VirtualFree(ptr, 0, MEM_RELEASE);
 
 #elif defined(OS_LINUX)
 
 	if (ptr != nullptr)
-		free(ptr);
+		munmap(ptr, large_page_bytes(bytes));
 
 #else
 
