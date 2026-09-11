@@ -569,6 +569,15 @@ struct EGTB_Paths
 	static inline const std::string DTM_EXT = ".lzdtm";
 	static inline const std::string INFO_EXT = ".info";
 
+	// Scratch artifacts of a bounded-memory run: the spilled distance pages
+	// (one file per page, the page number appended to the prefix) and the
+	// compressed blocks held back until the output file's index is known.
+	static inline const std::string DTC_PAGE_TMP_EXT[COLOR_NB] = { ".dtc.w.page", ".dtc.b.page" };
+	static inline const std::string DTM_PAGE_TMP_EXT[COLOR_NB] = { ".dtm.w.page", ".dtm.b.page" };
+	static inline const std::string WDL_BLOCKS_TMP_EXT[COLOR_NB] = { ".wdl.w.blocks", ".wdl.b.blocks" };
+	static inline const std::string DTC_BLOCKS_TMP_EXT[COLOR_NB] = { ".dtc.w.blocks", ".dtc.b.blocks" };
+	static inline const std::string DTM_BLOCKS_TMP_EXT[COLOR_NB] = { ".dtm.w.blocks", ".dtm.b.blocks" };
+
 	EGTB_Paths()
 	{
 	}
@@ -660,6 +669,31 @@ struct EGTB_Paths
 		return path_join(m_dtm_paths[0], ps.name() + INFO_EXT);
 	}
 
+	NODISCARD std::filesystem::path dtc_page_tmp_prefix(const Piece_Config& ps, Color c) const
+	{
+		return path_join(m_tmp_path, ps.name() + DTC_PAGE_TMP_EXT[c]);
+	}
+
+	NODISCARD std::filesystem::path dtm_page_tmp_prefix(const Piece_Config& ps, Color c) const
+	{
+		return path_join(m_tmp_path, ps.name() + DTM_PAGE_TMP_EXT[c]);
+	}
+
+	NODISCARD std::filesystem::path wdl_blocks_tmp_path(const Piece_Config& ps, Color c) const
+	{
+		return path_join(m_tmp_path, ps.name() + WDL_BLOCKS_TMP_EXT[c]);
+	}
+
+	NODISCARD std::filesystem::path dtc_blocks_tmp_path(const Piece_Config& ps, Color c) const
+	{
+		return path_join(m_tmp_path, ps.name() + DTC_BLOCKS_TMP_EXT[c]);
+	}
+
+	NODISCARD std::filesystem::path dtm_blocks_tmp_path(const Piece_Config& ps, Color c) const
+	{
+		return path_join(m_tmp_path, ps.name() + DTM_BLOCKS_TMP_EXT[c]);
+	}
+
 private:
 	std::filesystem::path m_tmp_path = "./tmp/";
 	std::vector<std::filesystem::path> m_dtc_paths = { "./dtc/" };
@@ -701,6 +735,9 @@ enum Packed_WDL_Entries : uint8_t {};
 
 // Number of single WDL entries in a single packed WDL entry.
 static constexpr size_t WDL_ENTRY_PACK_RATIO = 4;
+
+// Bits per single WDL entry inside a packed WDL entry.
+static constexpr size_t WDL_ENTRY_BITS = 2;
 
 // Packs 4 WDL entries, passed individually, into a single packed WDL entry.
 NODISCARD constexpr Packed_WDL_Entries pack_wdl_entries(WDL_Entry v0, WDL_Entry v1, WDL_Entry v2, WDL_Entry v3)

@@ -3,6 +3,7 @@
 #include "egtb_gen.h"
 
 #include "util/allocation.h"
+#include "util/utility.h"
 #include "util/progress_bar.h"
 #include "util/filesystem.h"
 #include "util/memory.h"
@@ -47,7 +48,7 @@ static void prepare_wdl_entries_for_compression(Span<WDL_Entry> data)
 	}
 }
 
-static void prepare_packed_wdl_entries_for_compression(Span<Packed_WDL_Entries> data)
+void prepare_packed_wdl_entries_for_compression(Span<Packed_WDL_Entries> data)
 {
 	if (data.size() == 0)
 		return;
@@ -79,83 +80,114 @@ void prepare_evtb_for_compression(In_Out_Param<Thread_Pool> thread_pool, Span<Pa
 	});
 }
 
-std::optional<LZ4_Dict> make_dict_for_evtb(
-	Const_Span<Packed_WDL_Entries> data
-)
+constexpr size_t DICT_MAX_SIZE = 1024 * 32;
+constexpr size_t MAX_TOTAL_SAMPLES_SIZE = DICT_MAX_SIZE * 1024;
+constexpr size_t SAMPLE_BLOCK_SIZE = 4096;
+constexpr size_t MIN_BLOCKS_TO_MAKE_DICT = 256;
+
+WDL_Dict_Sampling wdl_dict_sampling(size_t packed_bytes)
 {
-	constexpr size_t DICT_MAX_SIZE = 1024 * 32;
-	constexpr size_t MAX_TOTAL_SAMPLES_SIZE = DICT_MAX_SIZE * 1024;
-	constexpr size_t SAMPLE_BLOCK_SIZE = 4096;
-	constexpr size_t MIN_BLOCKS_TO_MAKE_DICT = 256;
+	const size_t block_cnt = packed_bytes / WDL_BLOCK_SIZE;
+	if (block_cnt < MIN_BLOCKS_TO_MAKE_DICT)
+		return {};
 
-	const size_t block_cnt = data.size() / WDL_BLOCK_SIZE;
+	WDL_Dict_Sampling sampling;
+	sampling.num_blocks = std::min(MAX_TOTAL_SAMPLES_SIZE / WDL_BLOCK_SIZE, block_cnt);
+	sampling.stride = std::max(block_cnt / sampling.num_blocks, size_t(1));
+	return sampling;
+}
 
-	if (block_cnt >= MIN_BLOCKS_TO_MAKE_DICT)
-	{
-		const size_t num_blocks_to_use = std::min(MAX_TOTAL_SAMPLES_SIZE / WDL_BLOCK_SIZE, block_cnt);
-		const size_t split = std::max(block_cnt / num_blocks_to_use, (size_t)1);
-		const size_t buf_size = num_blocks_to_use * WDL_BLOCK_SIZE;
+std::optional<LZ4_Dict> make_dict_from_wdl_samples(Const_Span<Packed_WDL_Entries> samples)
+{
+	if (samples.size() == 0)
+		return std::nullopt;
 
-		auto dist_buf = cpp20::make_unique_for_overwrite<Packed_WDL_Entries[]>(buf_size);
+	return LZ4_Dict::make(
+		Const_Span(reinterpret_cast<const uint8_t*>(samples.data()), samples.size()),
+		DICT_MAX_SIZE,
+		SAMPLE_BLOCK_SIZE);
+}
 
-		for (size_t i = 0; i < num_blocks_to_use; ++i)
-			std::memcpy(
-				dist_buf.get() + i * WDL_BLOCK_SIZE, 
-				data.data() + i * split * WDL_BLOCK_SIZE, 
-				WDL_BLOCK_SIZE
-			);
+std::optional<LZ4_Dict> make_dict_for_evtb(Const_Span<Packed_WDL_Entries> data)
+{
+	const WDL_Dict_Sampling sampling = wdl_dict_sampling(data.size());
+	if (sampling.num_blocks == 0)
+		return std::nullopt;
 
-		return LZ4_Dict::make(
-			Const_Span(reinterpret_cast<const uint8_t*>(dist_buf.get()), buf_size), 
-			DICT_MAX_SIZE, 
-			SAMPLE_BLOCK_SIZE
-		);
-	}
+	const size_t buf_size = sampling.num_blocks * WDL_BLOCK_SIZE;
+	auto dist_buf = cpp20::make_unique_for_overwrite<Packed_WDL_Entries[]>(buf_size);
 
+	for (size_t i = 0; i < sampling.num_blocks; ++i)
+		std::memcpy(
+			dist_buf.get() + i * WDL_BLOCK_SIZE,
+			data.data() + i * sampling.stride * WDL_BLOCK_SIZE,
+			WDL_BLOCK_SIZE);
+
+	return make_dict_from_wdl_samples(Const_Span<Packed_WDL_Entries>(dist_buf.get(), buf_size));
+}
+
+std::optional<WDL_Entry> singular_wdl_value(Color color, const EGTB_Info& info)
+{
+	if (info.draw_cnt[color] + info.lose_cnt[color] == 0)
+		return WDL_Entry::WIN;
+	if (info.win_cnt[color] + info.lose_cnt[color] == 0)
+		return WDL_Entry::DRAW;
+	if (info.win_cnt[color] + info.draw_cnt[color] == 0)
+		return WDL_Entry::LOSE;
 	return std::nullopt;
+}
+
+bool egtb_is_singular_draw(Color color, const EGTB_Info& info)
+{
+	return info.win_cnt[color] + info.lose_cnt[color] == 0;
 }
 
 Compressed_EGTB save_compress_evtb(
 	In_Out_Param<Thread_Pool> thread_pool,
 	Const_Span<Packed_WDL_Entries> lpSrcData,
 	Color color,
-	const EGTB_Info& info
+	const EGTB_Info& info,
+	size_t max_workers,
+	size_t in_memory_limit,
+	const std::filesystem::path& spill_path
 )
 {
 	const std::string task_name = std::string("save_compress_evtb ") + std::to_string(static_cast<int>(color));
 
-	if (info.draw_cnt[color] + info.lose_cnt[color] == 0)
+	if (const auto single = singular_wdl_value(color, info))
 	{
 		printf("%s: singular\n", task_name.c_str());
-		return Compressed_EGTB::make_singular(WDL_Entry::WIN);
-	}
-
-	if (info.win_cnt[color] + info.lose_cnt[color] == 0)
-	{
-		printf("%s: singular\n", task_name.c_str());
-		return Compressed_EGTB::make_singular(WDL_Entry::DRAW);
-	}
-
-	if (info.win_cnt[color] + info.draw_cnt[color] == 0)
-	{
-		printf("%s: singular\n", task_name.c_str());
-		return Compressed_EGTB::make_singular(WDL_Entry::LOSE);
+		return Compressed_EGTB::make_singular(*single);
 	}
 
 	auto dict = make_dict_for_evtb(lpSrcData);
 
 	auto raw_data = Const_Span(reinterpret_cast<const uint8_t*>(lpSrcData.data()), lpSrcData.size());
 
-	auto compressed_blocks = compress_blocks(
+	const size_t num_blocks = ceil_div(raw_data.size(), WDL_BLOCK_SIZE);
+
+	Compressed_Block_Store store;
+	store.open(num_blocks, raw_data.size(), in_memory_limit, spill_path);
+
+	const size_t PRINT_PERIOD = block_progress_period(WDL_BLOCK_SIZE, thread_pool->num_workers());
+	Concurrent_Progress_Bar progress_bar(num_blocks, PRINT_PERIOD, task_name);
+
+	const LZ4_Compress_Helper factory(dict.has_value() ? &*dict : nullptr);
+	compress_blocks_into(
 		thread_pool,
 		raw_data,
 		WDL_BLOCK_SIZE,
-		std::make_unique<LZ4_Compress_Helper>(dict.has_value() ? &*dict : nullptr),
-		task_name
+		factory,
+		0,
+		max_workers,
+		inout_param<Block_Sink>(store),
+		inout_param(progress_bar)
 	);
 
+	progress_bar.set_finished();
+
 	return Compressed_EGTB(
-		std::move(compressed_blocks),
+		std::move(store),
 		WDL_BLOCK_SIZE,
 		raw_data.size() % WDL_BLOCK_SIZE,
 		std::move(dict),
@@ -168,37 +200,204 @@ Compressed_EGTB save_compress_egtb(
 	Const_Span<uint8_t> lpSrcData,
 	Color color,
 	const EGTB_Info& info,
-	bool is_big
+	bool is_big,
+	size_t max_workers,
+	size_t in_memory_limit,
+	const std::filesystem::path& spill_path
 )
 {
-	static constexpr size_t BLOCK_SIZE = 1024 * 1024;
-
 	const std::string task_name = std::string("save_compress_egtb ") + std::to_string(static_cast<int>(color));
 
-	if (info.win_cnt[color] + info.lose_cnt[color] == 0)
+	if (egtb_is_singular_draw(color, info))
 	{
 		printf("%s: singular\n", task_name.c_str());
 		return Compressed_EGTB::make_singular(WDL_Entry::DRAW);
 	}
 
-	auto compressed_blocks = compress_blocks(
+	const size_t num_blocks = ceil_div(lpSrcData.size(), EGTB_BLOCK_SIZE);
+
+	Compressed_Block_Store store;
+	store.open(num_blocks, lpSrcData.size(), in_memory_limit, spill_path);
+
+	const size_t PRINT_PERIOD = block_progress_period(EGTB_BLOCK_SIZE, thread_pool->num_workers());
+	Concurrent_Progress_Bar progress_bar(num_blocks, PRINT_PERIOD, task_name);
+
+	const LZMA_Compress_Helper factory;
+	compress_blocks_into(
 		thread_pool,
 		lpSrcData,
-		BLOCK_SIZE,
-		std::make_unique<LZMA_Compress_Helper>(),
-		task_name
+		EGTB_BLOCK_SIZE,
+		factory,
+		0,
+		max_workers,
+		inout_param<Block_Sink>(store),
+		inout_param(progress_bar)
 	);
 
+	progress_bar.set_finished();
+
 	return Compressed_EGTB(
-		std::move(compressed_blocks),
-		BLOCK_SIZE,
-		lpSrcData.size() % BLOCK_SIZE,
+		std::move(store),
+		EGTB_BLOCK_SIZE,
+		lpSrcData.size() % EGTB_BLOCK_SIZE,
 		std::nullopt,
 		is_big
 	);
 }
 
+Compressed_EGTB save_compress_streamed(
+	In_Out_Param<Thread_Pool> thread_pool,
+	const Compress_Helper& factory,
+	size_t block_size,
+	size_t total_bytes,
+	void (*preprocess)(Span<Packed_WDL_Entries>),
+	std::optional<LZ4_Dict> dict,
+	bool is_big,
+	size_t max_workers,
+	size_t in_memory_limit,
+	const std::filesystem::path& spill_path,
+	const std::string& task_name,
+	const std::function<Span<uint8_t>()>& next_band
+)
+{
+	const size_t num_blocks = ceil_div(total_bytes, block_size);
+
+	Compressed_Block_Store store;
+	store.open(num_blocks, total_bytes, in_memory_limit, spill_path);
+
+	const size_t PRINT_PERIOD = block_progress_period(block_size, thread_pool->num_workers());
+	Concurrent_Progress_Bar progress_bar(num_blocks, PRINT_PERIOD, task_name);
+
+	size_t next_block_id = 0;
+	size_t bytes_emitted = 0;
+
+	auto compress_whole_blocks = [&](Span<uint8_t> data) {
+		if (preprocess != nullptr)
+			for (size_t off = 0; off < data.size(); off += block_size)
+				preprocess(Span<Packed_WDL_Entries>(
+					reinterpret_cast<Packed_WDL_Entries*>(data.data() + off),
+					std::min(block_size, data.size() - off)));
+
+		compress_blocks_into(
+			thread_pool,
+			Const_Span<uint8_t>(data.data(), data.size()),
+			block_size,
+			factory,
+			next_block_id,
+			max_workers,
+			inout_param<Block_Sink>(store),
+			inout_param(progress_bar));
+
+		next_block_id += ceil_div(data.size(), block_size);
+		bytes_emitted += data.size();
+	};
+
+	// Blocks are fixed-size and must land at their absolute id, so the tail of a
+	// band that does not fill a block is carried into the next band's first.
+	std::vector<uint8_t> carry;
+
+	auto emit = [&](Span<uint8_t> data, bool is_last) {
+		size_t offset = 0;
+
+		if (!carry.empty())
+		{
+			const size_t want = std::min(block_size - carry.size(), data.size());
+			carry.insert(carry.end(), data.begin(), data.begin() + want);
+			offset = want;
+
+			if (carry.size() == block_size || (is_last && offset == data.size()))
+				compress_whole_blocks(Span<uint8_t>(carry.data(), carry.size()));
+			else
+				return;
+
+			carry.clear();
+		}
+
+		const size_t remaining = data.size() - offset;
+		const size_t whole = is_last ? remaining : (remaining / block_size) * block_size;
+
+		if (whole != 0)
+			compress_whole_blocks(Span<uint8_t>(data.data() + offset, whole));
+
+		if (!is_last && remaining > whole)
+			carry.assign(data.begin() + offset + whole, data.end());
+	};
+
+	// The producer yields exactly total_bytes, so the band that completes the
+	// count is the one that must flush the carry.
+	size_t bytes_produced = 0;
+	for (;;)
+	{
+		const Span<uint8_t> band = next_band();
+		if (band.size() == 0)
+			break;
+		bytes_produced += band.size();
+		emit(band, bytes_produced == total_bytes);
+	}
+
+	progress_bar.set_finished();
+
+	if (bytes_emitted != total_bytes || next_block_id != num_blocks)
+		print_and_abort("Streaming compression produced %zu/%zu bytes in %zu/%zu blocks.\n",
+			bytes_emitted, total_bytes, next_block_id, num_blocks);
+
+	return Compressed_EGTB(
+		std::move(store),
+		block_size,
+		total_bytes % block_size,
+		std::move(dict),
+		is_big
+	);
+}
+
+namespace {
+
+// Copies the compressed blocks into the output file's payload area. Each block
+// has a known size, so the destination offsets are known up front and the
+// blocks can be copied in parallel; a spilled store reads them straight out of
+// its mapping.
+void write_blocks_concurrent(
+	In_Out_Param<Thread_Pool> thread_pool,
+	In_Out_Param<Serial_File_Writer> writer,
+	const Compressed_Block_Store& blocks
+)
+{
+	const size_t num_blocks = blocks.num_blocks();
+
+	std::vector<uint64_t> dst_offsets(num_blocks);
+	uint64_t total = 0;
+	for (size_t k = 0; k < num_blocks; ++k)
+	{
+		dst_offsets[k] = total;
+		total += blocks.block_size(k);
+	}
+
+	const uint64_t base_offset = writer->reserve(total);
+
+	std::atomic<size_t> next_block_id(0);
+	thread_pool->run_sync_task_on_all_threads([&](size_t) {
+		for (;;)
+		{
+			const size_t k = next_block_id.fetch_add(1, std::memory_order_relaxed);
+			if (k >= num_blocks)
+				return;
+			if (blocks.block_size(k) == 0)
+				continue;
+
+			const Const_Span<uint8_t> block = blocks.block(k);
+			if (!writer->write_at(base_offset + dst_offsets[k], block))
+				print_and_abort("Table block write failed\n");
+		}
+	});
+
+	for (size_t k = 0; k < num_blocks; ++k)
+		writer->hash(blocks.block(k));
+}
+
+}  // namespace
+
 void save_evtb_table(
+	In_Out_Param<Thread_Pool> thread_pool,
 	const Piece_Config& ps,
 	const Compressed_EGTB save_info[COLOR_NB],
 	std::filesystem::path file_path,
@@ -260,11 +459,9 @@ void save_evtb_table(
 
 	// file_size is found.
 
-	Memory_Mapped_File write_map;
-	if (!write_map.create(file_path.c_str(), file_size + 8))
+	Serial_File_Writer writer;
+	if (!writer.create(file_path.c_str(), EGTB_CHECKSUM_INIT_VALUE))
 		abort();
-
-	Serial_Memory_Writer writer(write_map.data_span());
 
 	writer.write<uint32_t>(narrowing_static_cast<uint32_t>(magic));
 	writer.write<uint32_t>(narrowing_static_cast<uint32_t>((ps.min_material_key().value() << 2ull) + table_colors.size()));
@@ -314,15 +511,16 @@ void save_evtb_table(
 			continue;
 
 		size_t offset = 0;
-		for (const auto& block : t.compressed_blocks())
+		for (size_t b = 0; b < t.num_blocks(); ++b)
 		{
-			writer.write<uint16_t>(narrowing_static_cast<uint16_t>(block.size()));
+			const size_t block_bytes = t.compressed_blocks().block_size(b);
+			writer.write<uint16_t>(narrowing_static_cast<uint16_t>(block_bytes));
 			writer.write<uint32_t>(narrowing_static_cast<uint32_t>(offset));
 
 			if (offset_bits[i] == 6)
 				writer.write<uint16_t>(narrowing_static_cast<uint16_t>(offset >> 32));
 
-			offset += block.size();
+			offset += block_bytes;
 		}
 	}
 
@@ -334,8 +532,7 @@ void save_evtb_table(
 		if (t.is_singular())
 			continue;
 
-		for (const auto& block : t.compressed_blocks())
-			writer.write(Const_Span(block));
+		write_blocks_concurrent(thread_pool, inout_param(writer), t.compressed_blocks());
 
 		writer.zero_align(64);
 	}
@@ -343,12 +540,12 @@ void save_evtb_table(
 	if (writer.num_bytes_written() != file_size)
 		print_and_abort("file size is wrong.\n");
 
-	writer.write_end_checksum(static_cast<uint64_t>(EGTB_CHECKSUM_INIT_VALUE));
-
-	write_map.close_file();
+	writer.write_end_checksum();
+	writer.close_file();
 }
 
 void save_egtb_table(
+	In_Out_Param<Thread_Pool> thread_pool,
 	const Piece_Config& ps,
 	const Compressed_EGTB save_info[COLOR_NB],
 	std::filesystem::path file_path,
@@ -385,10 +582,9 @@ void save_egtb_table(
 
 	// file_size is found.
 
-	Memory_Mapped_File write_map;
-	write_map.create(file_path.c_str(), file_size + 8);
-
-	Serial_Memory_Writer writer(write_map.data_span());
+	Serial_File_Writer writer;
+	if (!writer.create(file_path.c_str(), EGTB_CHECKSUM_INIT_VALUE))
+		abort();
 
 	writer.write<uint32_t>(narrowing_static_cast<uint32_t>(magic));
 	writer.write<uint32_t>(narrowing_static_cast<uint32_t>((ps.min_material_key().value() << 2ull) + table_colors.size()));
@@ -421,11 +617,12 @@ void save_egtb_table(
 			continue;
 
 		size_t offset = 0;
-		for (const auto& block : t.compressed_blocks())
+		for (size_t b = 0; b < t.num_blocks(); ++b)
 		{
-			ASSERT(block.size() < (1 << 20));
-			writer.write<uint64_t>((offset << 20) + block.size());
-			offset += block.size();
+			const size_t block_bytes = t.compressed_blocks().block_size(b);
+			ASSERT(block_bytes < (1 << 20));
+			writer.write<uint64_t>((offset << 20) + block_bytes);
+			offset += block_bytes;
 		}
 	}
 
@@ -437,21 +634,19 @@ void save_egtb_table(
 		if (t.is_singular())
 			continue;
 
-		for (const auto& block : t.compressed_blocks())
-			writer.write(Const_Span(block));
+		write_blocks_concurrent(thread_pool, inout_param(writer), t.compressed_blocks());
 		writer.zero_align(64);
 	}
 
 	if (writer.num_bytes_written() != file_size)
 		print_and_abort("file size is wrong.\n");
 
-	writer.write_end_checksum(static_cast<uint64_t>(EGTB_CHECKSUM_INIT_VALUE));
-
-	write_map.close_file();
+	writer.write_end_checksum();
+	writer.close_file();
 }
 
 Compressed_EGTB::Compressed_EGTB(
-	std::vector<std::vector<uint8_t>>&& compressed_blocks,
+	Compressed_Block_Store&& compressed_blocks,
 	size_t src_blk_sz,
 	size_t tail_blk_sz,
 	std::optional<LZ4_Dict> d,
@@ -466,8 +661,7 @@ Compressed_EGTB::Compressed_EGTB(
 	m_total_compressed_size(0),
 	m_dict(std::move(d))
 {
-	for (const auto& block : this->m_compressed_blocks)
-		m_total_compressed_size += block.size();
+	m_total_compressed_size = m_compressed_blocks.total_bytes();
 }
 
 void load_evtb_table(
@@ -576,7 +770,6 @@ void load_evtb_table(
 		ASSERT(data[i] != nullptr);
 		ASSERT(offset_tb[i] != nullptr);
 
-		Memory_Mapped_File out_map(Memory_Mapped_File::Access_Advice::RANDOM);
 		const size_t num_full_sized_blocks =
 			tail_size[i] != 0
 			? block_cnt[i] - 1
@@ -585,9 +778,10 @@ void load_evtb_table(
 		if (file_sz != evtb->uncompressed_file_size(Piece_Config_For_Gen(ps).num_positions()))
 			throw std::runtime_error("Invalid decompressed size of WDL table from " + sub_evtb.string());
 
-		out_map.create(tmp[i].c_str(), file_sz);
-
-		Serial_Memory_Writer writer(out_map.data_span());
+		Positional_Output_File out_file;
+		if (!out_file.create(tmp[i].c_str()))
+			throw std::runtime_error("Could not create flat WDL table at " + tmp[i].string());
+		uint64_t out_offset = 0;
 
 		// We prepend the dictionary to the output data, because
 		// LZ4_decompress_safe_usingDict uses a fast-path when the
@@ -614,9 +808,16 @@ void load_evtb_table(
 				: block_size[i];
 
 			const Const_Span<uint8_t> decompressed = dc_helper.decompress(Const_Span(src_data, size), decode_size);
-			writer.write(decompressed);
+			if (!out_file.write_at(out_offset, decompressed))
+				print_and_abort("Could not write flat WDL table\n");
+			out_offset += decompressed.size();
 		}
 
+		ASSERT(out_offset == file_sz);
+		out_file.close_file();
+		Memory_Mapped_File out_map(Memory_Mapped_File::Access_Advice::RANDOM);
+		if (!out_map.open_readonly(tmp[i].c_str()))
+			throw std::runtime_error("Could not reopen flat WDL table at " + tmp[i].string());
 		evtb->m_files[i] = std::move(out_map);
 	}
 }
@@ -711,7 +912,6 @@ void load_egtb_table(
 		ASSERT(data[i] != nullptr);
 		ASSERT(offset_tb[i] != nullptr);
 
-		Memory_Mapped_File out_map(Memory_Mapped_File::Access_Advice::RANDOM);
 		const size_t num_full_sized_blocks =
 			tail_size[i] != 0
 			? block_cnt[i] - 1
@@ -720,9 +920,10 @@ void load_egtb_table(
 		if (file_sz != egtb->uncompressed_file_size(Piece_Config_For_Gen(ps).num_positions()))
 			throw std::runtime_error("Invalid decompressed size of DTM table from " + sub_evtb.string());
 
-		out_map.create(tmp[i].c_str(), file_sz);
-
-		Serial_Memory_Writer writer(out_map.data_span());
+		Positional_Output_File out_file;
+		if (!out_file.create(tmp[i].c_str()))
+			throw std::runtime_error("Could not create flat DTM table at " + tmp[i].string());
+		uint64_t out_offset = 0;
 
 		LZMA_Decompress_Helper dc_helper(block_size[i] * DTM_File_For_Probe::ENTRY_SIZE);
 
@@ -742,9 +943,16 @@ void load_egtb_table(
 				: block_size[i];
 
 			const Const_Span<uint8_t> decompressed = dc_helper.decompress(Const_Span(p_src, data_size), decode_size);
-			writer.write(decompressed);
+			if (!out_file.write_at(out_offset, decompressed))
+				print_and_abort("Could not write flat DTM table\n");
+			out_offset += decompressed.size();
 		}
 
+		ASSERT(out_offset == file_sz);
+		out_file.close_file();
+		Memory_Mapped_File out_map(Memory_Mapped_File::Access_Advice::RANDOM);
+		if (!out_map.open_readonly(tmp[i].c_str()))
+			throw std::runtime_error("Could not reopen flat DTM table at " + tmp[i].string());
 		egtb->m_files[i] = std::move(out_map);
 	}
 }

@@ -9,6 +9,7 @@
 
 #include "egtb/egtb_gen_wdl_dtc.h"
 #include "egtb/egtb_gen_dtm.h"
+#include "egtb/egtb_memory.h"
 
 #include <vector>
 #include <string>
@@ -51,6 +52,13 @@ struct Program_Options
 	bool generate_run_list = true;
 	bool generate_tablebases = true;
 
+	// The share of MaxMem generation may commit; the rest is headroom for
+	// allocator overhead, sub-table mappings and ordinary process memory.
+	NODISCARD size_t generation_budget_bytes() const
+	{
+		return (memory_size * MiB) * 4 / 5;
+	}
+
 	std::filesystem::path egtb_gen_list_file_path = "autoList.txt";
 	std::filesystem::path egtb_gen_info_file_path = "egtb_gen_info.csv";
 	std::filesystem::path egtb_full_gen_info_file_path = "egtb_full_gen_info.csv";
@@ -58,39 +66,36 @@ struct Program_Options
 
 struct Gen_List_Candidate
 {
-	explicit Gen_List_Candidate(const Piece_Config& ps) :
+	Gen_List_Candidate(const Piece_Config& ps, const Program_Options& options) :
 		piece_set(ps),
-		wdl_info(DTC_Generator::wdl_generation_info(ps)),
-		dtc_info(DTC_Generator::dtc_generation_info(ps)),
-		dtm_info(DTM_Generator::dtm_generation_info(ps))
+		dtc_memory(plan_generation_memory(ps, Generation_Metric::WDL_DTC,
+			options.num_threads, options.generation_budget_bytes())),
+		dtm_memory(plan_generation_memory(ps, Generation_Metric::DTM,
+			options.num_threads, options.generation_budget_bytes()))
 	{
 	}
 
 	NODISCARD bool is_too_large() const
 	{
-		return !wdl_info.has_value() || !dtc_info.has_value() || !dtm_info.has_value();
+		return dtc_memory.too_large || dtm_memory.too_large;
 	}
 
-	NODISCARD bool requires_more_memory_than(size_t memory) const
+	// Rejected only when the budget is below the paged floor, not merely
+	// because the complete distance arrays do not fit.
+	NODISCARD bool exceeds_budget() const
 	{
-		return 
-			   !wdl_info.has_value() || wdl_info->memory_required_for_generation > memory 
-			|| !dtc_info.has_value() || dtc_info->memory_required_for_generation > memory
-			|| !dtm_info.has_value() || dtm_info->memory_required_for_generation > memory;
+		return dtc_memory.mode == Generation_Mode::REJECTED
+			|| dtm_memory.mode == Generation_Mode::REJECTED;
 	}
 
 	NODISCARD inline friend bool operator<(const Gen_List_Candidate& lhs, const Gen_List_Candidate& rhs) noexcept
 	{
-		if (lhs.wdl_info.has_value() && !rhs.wdl_info.has_value())
-			return true;
+		if (lhs.is_too_large() != rhs.is_too_large())
+			return rhs.is_too_large();
 
-		if (rhs.wdl_info.has_value() && !lhs.wdl_info.has_value())
-			return false;
-
-		if (   lhs.wdl_info.has_value()
-			&& rhs.wdl_info.has_value()
-			&& lhs.wdl_info->num_positions != rhs.wdl_info->num_positions)
-			return lhs.wdl_info->num_positions < rhs.wdl_info->num_positions;
+		if (   !lhs.is_too_large()
+			&& lhs.dtc_memory.num_positions != rhs.dtc_memory.num_positions)
+			return lhs.dtc_memory.num_positions < rhs.dtc_memory.num_positions;
 
 		if (lhs.piece_set.num_pieces() != rhs.piece_set.num_pieces())
 			return lhs.piece_set.num_pieces() < rhs.piece_set.num_pieces();
@@ -99,19 +104,12 @@ struct Gen_List_Candidate
 	}
 
 	Piece_Config piece_set;
-	std::optional<EGTB_Generation_Info> wdl_info;
-	std::optional<EGTB_Generation_Info> dtc_info;
-	std::optional<EGTB_Generation_Info> dtm_info;
+	Generation_Memory dtc_memory;
+	Generation_Memory dtm_memory;
 };
 
 struct Gen_List_Entry : Gen_List_Candidate
 {
-	explicit Gen_List_Entry(const Piece_Config& ps, const Program_Options& options) :
-		Gen_List_Candidate(ps)
-	{
-		fill_generation_needs(options);
-	}
-
 	explicit Gen_List_Entry(const Gen_List_Candidate& entry, const Program_Options& options) :
 		Gen_List_Candidate(entry)
 	{
@@ -123,16 +121,28 @@ struct Gen_List_Entry : Gen_List_Candidate
 		return generate_wdl || generate_dtc || generate_dtm;
 	}
 
+	// Resident memory the run will take: the flat total on the unbounded path,
+	// the paged floor otherwise.
 	NODISCARD size_t required_memory() const
 	{
+		auto planned = [](const Generation_Memory& m) {
+			return m.mode == Generation_Mode::PAGED ? m.paged_floor_total() : m.flat_total();
+		};
+
 		size_t m = 0;
-		if (generate_wdl && wdl_info.has_value())
-			update_max(m, wdl_info->memory_required_for_generation);
-		if (generate_dtc && dtc_info.has_value())
-			update_max(m, dtc_info->memory_required_for_generation);
-		if (generate_dtm && dtm_info.has_value())
-			update_max(m, dtm_info->memory_required_for_generation);
+		if (generate_wdl || generate_dtc)
+			update_max(m, planned(dtc_memory));
+		if (generate_dtm)
+			update_max(m, planned(dtm_memory));
 		return m;
+	}
+
+	NODISCARD char mode_char() const
+	{
+		const bool paged =
+			   ((generate_wdl || generate_dtc) && dtc_memory.mode == Generation_Mode::PAGED)
+			|| (generate_dtm && dtm_memory.mode == Generation_Mode::PAGED);
+		return paged ? 'P' : ' ';
 	}
 
 	bool generate_wdl;
@@ -151,7 +161,8 @@ private:
 void gen_tablebases(const std::vector<Gen_List_Entry>& gen_list, const Program_Options& options);
 
 using PieceFilterFunc = std::function<bool(Const_Span<size_t>)>;
-NODISCARD std::vector<Gen_List_Candidate> gen_man_piece_sets(size_t max_man_cnt, PieceFilterFunc filter = nullptr);
+NODISCARD std::vector<Gen_List_Candidate> gen_man_piece_sets(
+	size_t max_man_cnt, const Program_Options& options, PieceFilterFunc filter = nullptr);
 
 NODISCARD std::vector<Gen_List_Entry> make_gen_list(const Unique_Piece_Configs& piece_sets, const Program_Options& options);
 
@@ -179,7 +190,7 @@ int main(int argc, char* argv[])
 	if (args.size() >= 1 && args[0] == "compute_egtb_gen_info")
 	{
 		std::cout << "Gathering all piece configurations...\n";
-		const auto& list = gen_man_piece_sets(MAX_MAN);
+		const auto& list = gen_man_piece_sets(MAX_MAN, options);
 		std::cout << "Gathered total of " << list.size() << " piece configurations. Saving info...\n";
 		save_gen_info(list, options.egtb_full_gen_info_file_path);
 		std::cout << "Info saved to " << options.egtb_full_gen_info_file_path << '\n';
@@ -191,7 +202,7 @@ int main(int argc, char* argv[])
 	if (options.generate_run_list)
 	{
 		std::cout << "Gathering configurations with <=" << options.max_pieces << " pieces...\n";
-		const auto& list = gen_man_piece_sets(options.max_pieces, pieces_filter);
+		const auto& list = gen_man_piece_sets(options.max_pieces, options, pieces_filter);
 		std::cout << "Gathered total of " << list.size() << " candidate piece configurations. Saving...\n";
 		save_gen_info(list, options.egtb_gen_info_file_path);
 		std::cout << "Info saved to " << options.egtb_gen_info_file_path << '\n';
@@ -215,19 +226,20 @@ int main(int argc, char* argv[])
 		else
 		{
 			std::cout << gen_list.size() << " piece configurations will be processed further:\n";
-			printf("--%s--------------------\n", std::string(options.max_pieces, '-').c_str());
-			printf("| %s | WDL | DTC | DTM | Mem\n", std::string(options.max_pieces, ' ').c_str());
+			printf("--%s--------------------------\n", std::string(options.max_pieces, '-').c_str());
+			printf("| %s | WDL | DTC | DTM | Paged | Mem\n", std::string(options.max_pieces, ' ').c_str());
 			for (const auto& entry : gen_list)
 			{
-				printf("| %*s |  %c  |  %c  |  %c  | %zuMiB\n",
+				printf("| %*s |  %c  |  %c  |  %c  |   %c   | %zuMiB\n",
 					static_cast<int>(options.max_pieces), entry.piece_set.name().c_str(),
 					entry.generate_wdl ? '+' : ' ',
 					entry.generate_dtc ? '+' : ' ',
 					entry.generate_dtm ? '+' : ' ',
+					entry.mode_char(),
 					entry.required_memory() / MiB
 				);
 			}
-			printf("--%s--------------------\n", std::string(options.max_pieces, '-').c_str());
+			printf("--%s--------------------------\n", std::string(options.max_pieces, '-').c_str());
 		}
 
 		gen_tablebases(gen_list, options);
@@ -252,7 +264,7 @@ void gen_tablebases(const std::vector<Gen_List_Entry>& gen_list, const Program_O
 			try
 			{
 				const auto start_time = std::chrono::steady_clock::now();
-				DTC_Generator input(entry.piece_set, entry.generate_wdl, entry.generate_dtc, options.egtb_files);
+				DTC_Generator input(entry.piece_set, entry.generate_wdl, entry.generate_dtc, options.egtb_files, entry.dtc_memory);
 				input.gen(inout_param(thread_pool));
 				const auto end_time = std::chrono::steady_clock::now();
 				printf("WDL/DTC generation took %s\n", format_elapsed_time(start_time, end_time).c_str());
@@ -269,7 +281,7 @@ void gen_tablebases(const std::vector<Gen_List_Entry>& gen_list, const Program_O
 			try
 			{
 				const auto start_time = std::chrono::steady_clock::now();
-				DTM_Generator input(entry.piece_set, options.save_rule_bits, options.egtb_files);
+				DTM_Generator input(entry.piece_set, options.save_rule_bits, options.egtb_files, entry.dtm_memory);
 				input.gen(inout_param(thread_pool));
 				const auto end_time = std::chrono::steady_clock::now();
 				printf("DTM generation took %s\n", format_elapsed_time(start_time, end_time).c_str());
@@ -316,7 +328,7 @@ NODISCARD std::vector<Gen_List_Entry> make_gen_list(const Unique_Piece_Configs& 
 	for (const Piece_Config& ps : piece_sets)
 		ps.add_closure_in_dependency_order_to(closured_piece_sets, true);
 
-	const size_t safe_amount_of_memory_bytes = (options.memory_size * MiB) * 4 / 5;
+	const size_t budget_bytes = options.generation_budget_bytes();
 
 	std::vector<Gen_List_Entry> gen_list;
 	for (const Piece_Config& ps : closured_piece_sets)
@@ -327,10 +339,24 @@ NODISCARD std::vector<Gen_List_Entry> make_gen_list(const Unique_Piece_Configs& 
 			continue;
 		}
 
-		const Gen_List_Candidate candidate(ps);
-		if (candidate.requires_more_memory_than(safe_amount_of_memory_bytes))
+		const Gen_List_Candidate candidate(ps, options);
+		if (candidate.is_too_large())
 		{
-			std::cout << "WARN: Omitting " << ps.name() << " generation. Size exceeds available memory.\n";
+			std::cout << "WARN: Omitting " << ps.name() << " generation. Index space too large.\n";
+			continue;
+		}
+
+		if (candidate.exceeds_budget())
+		{
+			// The full breakdown is in egtb_gen_info.csv; this only says which
+			// metric fell short and by how much.
+			printf("WARN: Omitting %s generation. %zuMiB available;"
+				" DTC needs %zuMiB flat / %zuMiB paged, DTM %zuMiB / %zuMiB.\n",
+				ps.name().c_str(), budget_bytes / MiB,
+				candidate.dtc_memory.flat_total() / MiB,
+				candidate.dtc_memory.paged_floor_total() / MiB,
+				candidate.dtm_memory.flat_total() / MiB,
+				candidate.dtm_memory.paged_floor_total() / MiB);
 			continue;
 		}
 
@@ -471,7 +497,8 @@ NODISCARD std::array<std::pair<size_t, size_t>, PIECE_NB> supported_piece_count_
 	return piece_count_ranges;
 }
 
-NODISCARD std::vector<Gen_List_Candidate> gen_man_piece_sets(size_t max_man_cnt, PieceFilterFunc filter)
+NODISCARD std::vector<Gen_List_Candidate> gen_man_piece_sets(
+	size_t max_man_cnt, const Program_Options& options, PieceFilterFunc filter)
 {
 	const auto piece_count_ranges = supported_piece_count_ranges();
 
@@ -494,7 +521,10 @@ NODISCARD std::vector<Gen_List_Candidate> gen_man_piece_sets(size_t max_man_cnt,
 		piece_sets.add_unique(Piece_Config(Const_Span(pieces)));
 	}
 
-	std::vector<Gen_List_Candidate> res(piece_sets.begin(), piece_sets.end());
+	std::vector<Gen_List_Candidate> res;
+	res.reserve(piece_sets.size());
+	for (const Piece_Config& ps : piece_sets)
+		res.emplace_back(ps, options);
 	std::sort(res.begin(), res.end());
 	return res;
 }
@@ -528,30 +558,37 @@ bool parse_line(const std::string& line, std::string& name, std::string& value)
 void save_gen_info(const std::vector<Gen_List_Candidate>& infos, std::filesystem::path path)
 {
 	std::ofstream out_file(path);
-	out_file << "Piece configuration;Num positions;WDL uncompressed size;DTC uncompressed size;DTM uncompressed size;WDL generation memory;DTC generation memory;DTM generation memory;WDL sub EGTB size;DTC sub EGTB size;DTM sub EGTB size\n";
+	out_file
+		<< "Piece configuration;Num positions;"
+		   "DTC flat;DTC paged floor;DTC mode;"
+		   "DTM flat;DTM paged floor;DTM mode\n";
 	for (size_t i = 0; i < infos.size(); ++i)
 	{
 		const auto& entry = infos[i];
-		char buf[1024];
+		const Generation_Memory& dtc = entry.dtc_memory;
+		const Generation_Memory& dtm = entry.dtm_memory;
+
+		auto mode_name = [](Generation_Mode m) {
+			switch (m)
+			{
+			case Generation_Mode::FLAT: return "flat";
+			case Generation_Mode::PAGED: return "paged";
+			default: return "rejected";
+			}
+		};
+
+		char buf[256];
 		if (entry.is_too_large())
 		{
-			std::snprintf(buf, sizeof(buf),
-				"%-32s;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE;TOO LARGE\n",
-				entry.piece_set.name().c_str()
-			);
+			std::snprintf(buf, sizeof(buf), "%-32s;TOO LARGE\n", entry.piece_set.name().c_str());
 		}
 		else
 		{
-			ASSERT(entry.wdl_info.has_value());
-			ASSERT(entry.dtc_info.has_value());
-			ASSERT(entry.dtm_info.has_value());
-
 			std::snprintf(buf, sizeof(buf),
-				"%-32s;%016zu;%010zuMiB;%010zuMiB;%010zuMiB;%010zuMiB;%010zuMiB;%010zuMiB;%010zuMiB;%010zuMiB;%010zuMiB\n",
-				entry.piece_set.name().c_str(), entry.wdl_info->num_positions,
-				entry.wdl_info->uncompressed_size / MiB, entry.dtc_info->uncompressed_size / MiB, entry.dtm_info->uncompressed_size / MiB,
-				entry.wdl_info->memory_required_for_generation / MiB, entry.dtc_info->memory_required_for_generation / MiB, entry.dtm_info->memory_required_for_generation / MiB,
-				entry.wdl_info->uncompressed_sub_tb_size / MiB, entry.dtc_info->uncompressed_sub_tb_size / MiB, entry.dtm_info->uncompressed_sub_tb_size / MiB
+				"%-32s;%016zu;%010zuMiB;%010zuMiB;%s;%010zuMiB;%010zuMiB;%s\n",
+				entry.piece_set.name().c_str(), dtc.num_positions,
+				dtc.flat_total() / MiB, dtc.paged_floor_total() / MiB, mode_name(dtc.mode),
+				dtm.flat_total() / MiB, dtm.paged_floor_total() / MiB, mode_name(dtm.mode)
 			);
 		}
 		out_file << std::string(buf);

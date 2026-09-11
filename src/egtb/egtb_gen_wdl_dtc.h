@@ -1,7 +1,9 @@
 #pragma once
 
 #include "egtb.h"
+#include "egtb_compress.h"
 #include "egtb_gen.h"
+#include "egtb_memory.h"
 
 #include "chess/chess.h"
 #include "chess/position.h"
@@ -14,6 +16,7 @@
 #include "util/progress_bar.h"
 #include "util/compress.h"
 
+#include <memory>
 #include <vector>
 #include <string>
 #include <map>
@@ -31,59 +34,12 @@ struct DTC_Generator : public EGTB_Generator
 		STEP_1, STEP_2, STEP_3
 	};
 
-	NODISCARD static std::optional<EGTB_Generation_Info> wdl_generation_info(const Piece_Config& ps)
-	{
-		EGTB_Generation_Info info;
-		const auto maybe_num_positions = Piece_Config_For_Gen::num_positions_safe(ps);
-		if (!maybe_num_positions.has_value())
-			return std::nullopt;
-
-		info.num_positions = *maybe_num_positions;
-
-		info.memory_required_for_generation =
-			  info.num_positions * (sizeof(DTC_Final_Entry) * 2)
-			+ info.num_positions * 5 / 8; // EGTB_Bits
-
-		info.uncompressed_size = info.num_positions * sizeof(WDL_Entry) * 2 / WDL_ENTRY_PACK_RATIO;
-
-		info.uncompressed_sub_tb_size = 0;
-		for (const auto& [cap, sub_ps] : ps.sub_configs_by_capture())
-			if (sub_ps.has_any_free_attackers())
-				info.uncompressed_sub_tb_size += 
-					Piece_Config_For_Gen(sub_ps).num_positions() * sizeof(WDL_Entry) * 2 / WDL_ENTRY_PACK_RATIO;
-
-		return info;
-	}
-
-	NODISCARD static std::optional<EGTB_Generation_Info> dtc_generation_info(const Piece_Config& ps)
-	{
-		EGTB_Generation_Info info;
-		const auto maybe_num_positions = Piece_Config_For_Gen::num_positions_safe(ps);
-		if (!maybe_num_positions.has_value())
-			return std::nullopt;
-
-		info.num_positions = *maybe_num_positions;
-
-		info.memory_required_for_generation =
-			  info.num_positions * (sizeof(DTC_Final_Entry) * 2)
-			+ info.num_positions * 5 / 8; // EGTB_Bits
-
-		info.uncompressed_size = info.num_positions * (sizeof(DTC_Final_Entry) * 2);
-
-		info.uncompressed_sub_tb_size = 0;
-		for (const auto& [cap, sub_ps] : ps.sub_configs_by_capture())
-			if (sub_ps.has_any_free_attackers())
-				info.uncompressed_sub_tb_size += 
-					Piece_Config_For_Gen(sub_ps).num_positions() * (sizeof(DTC_Final_Entry) * 2);
-
-		return info;
-	}
-
 	DTC_Generator(
 		const Piece_Config& ps, 
 		bool save_wdl,
 		bool save_dtc,
-		const EGTB_Paths& egtb_files
+		const EGTB_Paths& egtb_files,
+		const Generation_Memory& memory
 	);
 
 	void gen(In_Out_Param<Thread_Pool> thread_pool);
@@ -99,6 +55,7 @@ protected:
 	DTC_Score m_max_conv;
 
 	EGTB_Paths m_egtb_files;
+	Generation_Memory m_memory;
 	Temporary_File_Tracker m_tmp_files;
 	bool m_save_wdl;
 	bool m_save_dtc;
@@ -150,10 +107,67 @@ protected:
 		return entry.is_win<ORDER>();
 	}
 
+	// Creates the two distance tables either flat or paged, following the
+	// plan, and attaches the pager in the latter case.
+	void setup_storage();
+	void teardown_storage();
+
+	NODISCARD uint64_t page_magic(Color c) const;
+
 	void open_sub_evtb();
 	void close_sub_evtb();
 
 	void save_egtb(In_Out_Param<Thread_Pool> thread_pool);
+
+	// Compresses one DTC table, from the flat array or by streaming the paged
+	// one in logical index order. The output bytes are identical either way.
+	NODISCARD Compressed_EGTB compress_dtc_table(
+		In_Out_Param<Thread_Pool> thread_pool,
+		Color me,
+		const EGTB_Info& info
+	);
+
+	NODISCARD Compressed_EGTB compress_wdl_table(
+		In_Out_Param<Thread_Pool> thread_pool,
+		Color me,
+		const EGTB_Info& info
+	);
+
+	// A sweep of one paged DTC table in logical Board_Index order.
+	//
+	// Both output files are pure functions of the distance entries and the
+	// resident unknown bitset, so a paged run derives them as the table is
+	// swept instead of materializing them.
+	struct Logical_Sweep
+	{
+		std::unique_ptr<Paged_Logical_Reader> reader;
+		Color me = WHITE;
+		Board_Index next_index = BOARD_INDEX_ZERO;
+		std::vector<uint8_t> out;
+	};
+
+	NODISCARD Logical_Sweep begin_logical_sweep(Color me) const;
+
+	// Next band of the finalized DTC image: illegal and drawn positions become
+	// draws, which is the only thing the flat path's gen_evtb writes back.
+	template <DTC_Entry_Order ORDER>
+	NODISCARD Span<uint8_t> next_dtc_band(In_Out_Param<Thread_Pool> thread_pool, In_Out_Param<Logical_Sweep> sweep) const;
+
+	// Next band of the packed WDL projection, accumulating its statistics.
+	template <DTC_Entry_Order ORDER>
+	NODISCARD Span<uint8_t> next_wdl_band(
+		In_Out_Param<Thread_Pool> thread_pool,
+		In_Out_Param<Logical_Sweep> sweep,
+		Optional_In_Out_Param<EGTB_Info> info
+	) const;
+
+	// Sweeps both tables once to gather the statistics gen_evtb would have, and
+	// to collect the samples the WDL dictionary is trained on. Paged only.
+	NODISCARD EGTB_Info gather_paged_info(In_Out_Param<Thread_Pool> thread_pool);
+
+	// Dictionary samples collected by gather_paged_info, one buffer per
+	// color, in the layout make_dict_for_evtb expects.
+	std::vector<Packed_WDL_Entries> m_wdl_dict_samples[COLOR_NB];
 
 	void init_entries(In_Out_Param<Thread_Pool> thread_pool);
 	void sp_init_entries(
