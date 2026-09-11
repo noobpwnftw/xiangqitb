@@ -15,6 +15,15 @@ void atomic_fetch_or(uint8_t* p, uint8_t v)
 #endif
 }
 
+void atomic_fetch_and(uint64_t* p, uint64_t v)
+{
+#if defined(OS_WINDOWS)
+	InterlockedAnd64(reinterpret_cast<volatile LONG64*>(p), v);
+#else
+	__atomic_fetch_and(p, v, __ATOMIC_RELAXED);
+#endif
+}
+
 void atomic_fetch_or(uint16_t* p, uint16_t v)
 {
 #if defined(OS_WINDOWS)
